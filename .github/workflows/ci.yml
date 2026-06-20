@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22]
+    name: test (node ${{ matrix.node }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Comprobar que el servidor arranca
+        run: |
+          node src/index.js &
+          PID=$!
+          sleep 3
+          curl -fsS http://127.0.0.1:4000/health
+          kill $PID
+      - name: Batería de tests offline
+        run: npm test
