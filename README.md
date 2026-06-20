@@ -1,81 +1,171 @@
 # wapi
 
-API REST autohospedada para WhatsApp, con una **implementación nativa propia** del
-protocolo multi-device (Noise + Signal + códec binario) — **sin navegador** y sin
-librerías de terceros para el protocolo.
+A self-hosted WhatsApp REST API with a from-scratch, native implementation of the WhatsApp multi-device protocol — no browser, no third-party protocol library.
 
-> ⚠️ **Aviso**: usa una reimplementación no oficial del protocolo de WhatsApp.
-> Va contra los Términos de Servicio de WhatsApp y puede provocar el baneo del
-> número. Úsalo bajo tu responsabilidad y solo con cuentas de prueba.
+> ⚠️ **Terms of Service warning**
+> wapi talks to WhatsApp through an **unofficial reimplementation** of its multi-device protocol. This **violates the WhatsApp Terms of Service** and **can get the phone number banned**. Use it entirely at your own risk, and **only with test numbers** you can afford to lose. Do not use it with personal, business, or production accounts.
 
-## Qué es
+## What it is
 
-- **API REST + explorador OpenAPI** (`/docs`): la llamas por HTTP desde cualquier lenguaje.
-- **Protocolo nativo**: handshake Noise XX, sesiones Signal (1:1 y sender keys de grupo),
-  códec binario y WAProto propios. No usa Puppeteer/Chromium ni Baileys.
-- **Ligero**: ~30–50 MB por sesión (sin navegador), multi-sesión.
+- **Native protocol, no browser.** wapi speaks the WhatsApp multi-device protocol directly: the Noise XX handshake, Signal/libsignal sessions (1:1 plus group sender keys), a custom binary node codec, WAProto protobufs, and App State Sync with LTHash. There is **no Puppeteer/Chromium and no Baileys** — the protocol core is written from scratch.
+- **Lightweight.** Because there is no embedded browser, each session uses roughly **30–50 MB of RAM**.
+- **Multi-session.** Run many WhatsApp accounts from a single process; each session persists its own credentials and keys to disk and is rehydrated on restart.
+- **HTTP-first.** Everything is driven over a plain REST API, so you can call it from any language. A browsable OpenAPI explorer ships at `/docs`.
 
-## Funcionalidades
+## Features
 
-- Emparejamiento por **QR** (imagen PNG auto-refrescante en `/sessions/:id/qr.png`)
-  o por **código de teléfono** (`/sessions/:id/pairing-code`)
-- **Mensajes**: texto, media (imagen/audio/vídeo/documento/sticker), reacciones,
-  citas, menciones, ubicación, contactos, encuestas (con descifrado de votos),
-  editar, borrar/revocar, reenviar
-- **Mensajes interactivos**: botones, listas, plantillas, native-flow (modernos),
-  productos; **fijar/mantener** mensajes; recibos `played` (audio escuchado)
-- **Grupos**: enviar/recibir (sender keys) + admin (crear, participantes, asunto,
-  descripción, invitaciones, salir), **efímeros**, **solicitudes de unión**
-  (aprobar/rechazar), modo de añadir/aprobación, **comunidades** (crear/enlazar/subgrupos)
-- **Recibos** (entrega/lectura/played/retry), **presencia**, **perfil/contactos/privacidad**
-- **Bloqueos** (bloquear/desbloquear/listar) y **estados/historias** (publicar texto)
-- **Lista de chats** vía history sync, **newsletters/canales**
-- **App State bidireccional**: enviar Y recibir (archivar/fijar/silenciar/marcar
-  leído/estrella/borrar) con sincronización de versión y LTHash
-- **LID** (Linked ID): mapeo PN↔LID, migración de sesión Signal, addressing
-- **Llamadas**: detección y rechazo (el audio/vídeo no es posible de forma nativa)
+**Pairing**
+- QR pairing — auto-refreshing PNG image at `/sessions/:id/qr.png` (also raw at `/sessions/:id/qr`)
+- Phone **pairing code** — `POST /sessions/:id/pairing-code` returns an 8-character code to enter on the phone
 
-## Arranque
+**Messages**
+- Text, media (image, audio, video, document, sticker)
+- Rich content: reactions, quotes/replies, mentions, location, contacts
+- Polls (including vote decryption)
+- Edit, delete/revoke, forward
+
+**Interactive messages**
+- Buttons, lists, templates, and modern **native-flow** messages
+- Product messages
+- Pin / keep-in-chat
+
+**Groups**
+- Send and receive via sender keys
+- Admin: create, manage participants, subject, description, invite links, leave
+- **Ephemeral** (disappearing) messages
+- **Join requests** (approve / reject) and add/approval mode
+- **Communities** — create, link, and manage subgroups
+
+**Privacy & contacts**
+- Blocklist — block, unblock, list
+- Profile, contacts, and privacy settings
+- LID addressing — PN↔LID mapping, Signal session migration
+
+**Presence & receipts**
+- Delivery, read, **played** (voice note listened), and retry receipts
+- Presence (online/typing/recording)
+
+**Status & channels**
+- Status / stories (publish text)
+- Newsletters / channels
+
+**State sync**
+- **Bidirectional App State** — send *and* receive archive, pin, mute, mark-read, star, and delete, with version sync and LTHash verification
+- Chat list via history sync
+
+**Calls**
+- Detect and reject incoming calls (native audio/video is out of scope)
+
+## Quick start
+
+Requires **Node.js ≥ 18.17**.
 
 ```bash
+git clone https://github.com/jaimemartinez/wapi.git
+cd wapi
 npm install
-npm start            # API en http://127.0.0.1:4000  (docs en /docs)
+npm start
+# API listening on http://127.0.0.1:4000  (OpenAPI explorer at /docs)
 ```
 
-Crear una sesión y emparejar:
+**1. Create a session**
 
 ```bash
-curl -X POST http://127.0.0.1:4000/sessions -H 'content-type: application/json' -d '{"id":"yo"}'
-# abre http://127.0.0.1:4000/sessions/yo/qr.png en el navegador y escanéalo
+curl -X POST http://127.0.0.1:4000/sessions \
+  -H 'content-type: application/json' \
+  -d '{"id":"me"}'
 ```
 
-Enviar un mensaje:
+**2a. Pair by scanning a QR code**
+
+Open the auto-refreshing QR image in a browser and scan it from the phone
+(**WhatsApp → Linked devices → Link a device**):
+
+```
+http://127.0.0.1:4000/sessions/me/qr.png
+```
+
+**2b. …or pair with a phone-number code**
 
 ```bash
-curl -X POST http://127.0.0.1:4000/sessions/yo/messages \
-  -H 'content-type: application/json' -d '{"to":"34600111222","text":"hola"}'
+curl -X POST http://127.0.0.1:4000/sessions/me/pairing-code \
+  -H 'content-type: application/json' \
+  -d '{"phone":"34600111222"}'
+# -> { "code": "ABCD-1234", ... }  enter it on the phone:
+# WhatsApp -> Linked devices -> Link with phone number instead
 ```
 
-Configurable por entorno: `WAPI_PORT` (4000), `WAPI_HOST`, `WAPI_KEY` (cabecera `x-api-key`).
-
-## Estado y límites (honesto)
-
-El **núcleo del protocolo** (handshake, Signal, sender keys, media, LTHash, códec)
-está verificado byte a byte contra el cliente oficial, y la mayoría de funciones
-están cubiertas por tests offline. Aun así **no** es equivalente al 100% a librerías
-maduras de años: el **emparejamiento por código** está cableado pero **no probado en
-vivo** (requiere un número sin vincular); faltan cuentas **hosted/business**, el
-buffering de eventos y parte de la robustez de casos límite. Prueba cada función en
-vivo antes de confiar en producción.
-
-## Tests
+**3. Send a message**
 
 ```bash
-npm test     # batería offline: cripto, códec, proto y roundtrips por capa
+curl -X POST http://127.0.0.1:4000/sessions/me/messages \
+  -H 'content-type: application/json' \
+  -d '{"to":"34600111222","text":"hello from wapi"}'
 ```
 
-El CI (GitHub Actions) ejecuta los tests en Node 18/20/22 y comprueba que el servidor arranca.
+Check session status at any time:
 
-## Licencia
+```bash
+curl http://127.0.0.1:4000/sessions/me
+```
 
-MIT
+## Authentication
+
+The API is **unauthenticated by default** (it binds to `127.0.0.1`). To require a token, set `WAPI_KEY` and send it on every request via the `x-api-key` header:
+
+```bash
+WAPI_KEY=s3cret npm start
+```
+
+```bash
+curl http://127.0.0.1:4000/sessions \
+  -H 'x-api-key: s3cret'
+```
+
+Requests without a matching `x-api-key` receive `401 unauthorized`. The `/health`, `/docs`, and `/openapi.json` endpoints stay public.
+
+## Documentation
+
+- **OpenAPI explorer** — interactive Swagger UI at [`/docs`](http://127.0.0.1:4000/docs)
+- **OpenAPI spec** — machine-readable JSON at [`/openapi.json`](http://127.0.0.1:4000/openapi.json)
+- **Guides** (in [`docs/`](docs/)):
+  - [`GETTING_STARTED.md`](docs/GETTING_STARTED.md) — install, run, and your first message
+  - [`PAIRING.md`](docs/PAIRING.md) — QR vs. phone pairing-code flows
+  - [`API.md`](docs/API.md) — full endpoint reference
+  - [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — protocol internals (Noise, Signal, codec, App State Sync)
+
+## Configuration
+
+All configuration is via environment variables — no config file, no container needed.
+
+| Variable            | Default                   | Description                                                        |
+| ------------------- | ------------------------- | ------------------------------------------------------------------ |
+| `WAPI_HOST`         | `127.0.0.1`               | Host/interface the REST API binds to.                              |
+| `WAPI_PORT`         | `4000`                    | Port the REST API listens on.                                      |
+| `WAPI_KEY`          | *(empty)*                 | API token. If set, every request must send `x-api-key`. Empty = no auth. |
+| `WAPI_SESSIONS_DIR` | `./sessions`              | Directory where each session's credentials and keys are persisted. |
+| `WAPI_DEVICE_NAME`  | `wapi`                    | Device name announced to WhatsApp during the handshake.            |
+
+## Testing
+
+```bash
+npm test     # offline suite: crypto, binary codec, protobufs, and per-layer roundtrips
+```
+
+Continuous integration (GitHub Actions) runs the test suite on **Node 18, 20, and 22**, and verifies that the server boots and answers `/health`.
+
+## Project status & limitations
+
+This is an honest assessment — read it before relying on wapi.
+
+- **The protocol core is solid.** The handshake, Signal sessions, group sender keys, media encryption, App State Sync / LTHash, and the binary node codec are **verified byte-for-byte against the official WhatsApp client**.
+- **Most features are verified by offline tests only.** The high-level features above are covered by an offline test battery, but the majority have **not** been hardened by years of live, large-scale use the way mature libraries have.
+- **Phone pairing-code is wired but not live-tested.** The flow is implemented end-to-end but requires an unlinked number to exercise; treat it as experimental.
+- **No hosted / business accounts.** Only standard linked-device accounts are supported.
+- **Edge-case robustness is limited.** Event buffering and some uncommon protocol paths are still rough.
+
+**Verify each feature live with a disposable test number before trusting it for anything important.**
+
+## License
+
+[MIT](LICENSE)

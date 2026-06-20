@@ -10,7 +10,7 @@
 //   - me / account:        se rellenan tras el pair-success (jid del dispositivo).
 //
 // Las firmas Curve25519 (XEdDSA) no están en node:crypto; las hace `libsignal`.
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import libsignal from 'libsignal';
 import { generateX25519KeyPair, randomBytes } from '../protocol/crypto.js';
@@ -125,16 +125,30 @@ function fileFor(dir, id) {
 
 export async function saveAuthState(dir, id, state) {
   await mkdir(dir, { recursive: true });
-  await writeFile(fileFor(dir, id), JSON.stringify(state, replacer, 2), 'utf8');
+  // Escritura ATÓMICA: volcamos a un temporal y renombramos encima. Así un
+  // corte (kill/caída) a mitad de escritura nunca deja el fichero truncado.
+  const path = fileFor(dir, id);
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, JSON.stringify(state, replacer, 2), 'utf8');
+  await rename(tmp, path);
 }
 
 export async function loadAuthState(dir, id) {
+  let raw;
   try {
-    const raw = await readFile(fileFor(dir, id), 'utf8');
-    return JSON.parse(raw, reviver);
+    raw = await readFile(fileFor(dir, id), 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;
+  }
+  // Fichero vacío o corrupto (p.ej. truncado por un corte): no tumbamos el
+  // arranque; lo tratamos como sin credenciales y avisamos.
+  if (!raw.trim()) { console.error(`[auth] ${id}: fichero de credenciales vacío, se ignora`); return null; }
+  try {
+    return JSON.parse(raw, reviver);
+  } catch (e) {
+    console.error(`[auth] ${id}: credenciales corruptas (${e.message}); se ignora — re-vincula la sesión`);
+    return null;
   }
 }
 

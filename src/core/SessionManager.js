@@ -24,6 +24,7 @@ export class SessionManager {
     }
     for (const file of files) {
       if (!file.endsWith('.json')) continue;
+      if (file.endsWith('.state.json') || file.endsWith('.json.tmp')) continue; // no son ficheros de credenciales
       const id = file.slice(0, -5);
       const auth = await loadAuthState(this.config.sessionsDir, id);
       if (!auth) continue;
