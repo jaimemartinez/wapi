@@ -1,0 +1,139 @@
+// Batería de tests offline (sin red): cripto, códec, proto y roundtrips de cada
+// capa. Es lo que ejecuta el CI. Sale con código !=0 si algo falla.
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+
+let passed = 0;
+async function test(name, fn) {
+  try { await fn(); passed++; console.log(`  ok  ${name}`); }
+  catch (e) { console.error(`FAIL  ${name}\n      ${e.message}`); process.exitCode = 1; }
+}
+
+const { loadProto, encode, decode, type } = await import('../src/core/proto.js');
+await loadProto();
+
+console.log('# proto + módulos');
+await test('todos los módulos del core importan', async () => {
+  for (const m of [
+    'auth', 'payload', 'pairing', 'pairing-code', 'WhatsAppClient', 'SessionManager', 'Session',
+    'devices', 'messages', 'receipts', 'media', 'history', 'groups', 'profile', 'newsletters', 'appstate',
+    'signal/store', 'signal/repository', 'signal/group/group_cipher',
+  ]) await import(`../src/core/${m}.js`);
+  for (const m of ['encode', 'decode', 'tokens', 'jid']) await import(`../src/protocol/binary/${m}.js`);
+});
+
+console.log('# crypto');
+await test('X25519 simétrico y compatible con libsignal', async () => {
+  const { generateX25519KeyPair, sharedKey } = await import('../src/protocol/crypto.js');
+  const a = generateX25519KeyPair(); const b = generateX25519KeyPair();
+  assert.equal(Buffer.compare(sharedKey(a.private, b.public), sharedKey(b.private, a.public)), 0);
+  const libsignal = (await import('libsignal')).default;
+  const ls = libsignal.curve.calculateAgreement(Buffer.concat([Buffer.from([5]), b.public]), a.private);
+  assert.equal(Buffer.compare(sharedKey(a.private, b.public), Buffer.from(ls)), 0);
+});
+await test('HKDF cumple RFC 5869 (test case 1)', async () => {
+  const { hkdf } = await import('../src/protocol/crypto.js');
+  const out = hkdf(Buffer.alloc(22, 0x0b), 42, { salt: Buffer.from('000102030405060708090a0b0c', 'hex'), info: Buffer.from('f0f1f2f3f4f5f6f7f8f9', 'hex') });
+  assert.equal(out.toString('hex'), '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865');
+});
+
+console.log('# códec binario');
+await test('roundtrip nibble (impar/par) + tokens', async () => {
+  const { encodeBinaryNode } = await import('../src/protocol/binary/encode.js');
+  const { decodeBinaryNode } = await import('../src/protocol/binary/decode.js');
+  for (const id of ['1781925865572.1', '1781925865572.12', '12345', '.1', '99-88']) {
+    const rt = decodeBinaryNode(encodeBinaryNode({ tag: 'iq', attrs: { id }, content: undefined }));
+    assert.equal(rt.attrs.id, id, `id ${id}`);
+  }
+});
+await test('AD_JID: LID/hosted/whatsapp roundtrip correcto', async () => {
+  const { encodeBinaryNode } = await import('../src/protocol/binary/encode.js');
+  const { decodeBinaryNode } = await import('../src/protocol/binary/decode.js');
+  for (const jid of ['573014333576:65@s.whatsapp.net', '123456:5@lid', '111:3@hosted', '222:7@hosted.lid']) {
+    const rt = decodeBinaryNode(encodeBinaryNode({ tag: 'to', attrs: { jid }, content: undefined }));
+    assert.equal(rt.attrs.jid, jid);
+  }
+});
+
+console.log('# Signal 1:1');
+await test('encrypt/decrypt 1:1 roundtrip', async () => {
+  const { newAuthState, generatePreKeys } = await import('../src/core/auth.js');
+  const { SignalStore } = await import('../src/core/signal/store.js');
+  const { processPreKeyBundle, encryptSignalMessage, decryptSignalMessage } = await import('../src/core/signal/repository.js');
+  const aA = newAuthState(); aA.me = { id: '111:0@s.whatsapp.net' };
+  const bA = newAuthState(); bA.me = { id: '222:0@s.whatsapp.net' };
+  const aS = new SignalStore(aA); const bS = new SignalStore(bA);
+  const [bp] = generatePreKeys(bA, 1);
+  await processPreKeyBundle(aS, bA.me.id, { registrationId: bA.registrationId, identityKey: bA.signedIdentityKey.public,
+    signedPreKey: { keyId: bA.signedPreKey.keyId, publicKey: bA.signedPreKey.keyPair.public, signature: bA.signedPreKey.signature },
+    preKey: { keyId: bp.keyId, publicKey: bp.keyPair.public } });
+  const enc = await encryptSignalMessage(aS, bA.me.id, encode('Message', { conversation: 'hola' }));
+  const dec = decode('Message', await decryptSignalMessage(bS, aA.me.id, enc.type, enc.ciphertext));
+  assert.equal(dec.conversation, 'hola');
+});
+
+console.log('# sender keys (grupos)');
+await test('cifrado de grupo roundtrip', async () => {
+  const { GroupSessionBuilder } = await import('../src/core/signal/group/group-session-builder.js');
+  const { GroupCipher } = await import('../src/core/signal/group/group_cipher.js');
+  const { SenderKeyName } = await import('../src/core/signal/group/sender-key-name.js');
+  const { SenderKeyRecord } = await import('../src/core/signal/group/sender-key-record.js');
+  const { SenderKeyDistributionMessage } = await import('../src/core/signal/group/sender-key-distribution-message.js');
+  const mk = () => { const m = new Map(); return { async loadSenderKey(n) { return new SenderKeyRecord(m.get(n.toString())); }, async storeSenderKey(n, r) { m.set(n.toString(), r.serialize()); } }; };
+  const name = new SenderKeyName('g@g.us', { id: '111', deviceId: 0, toString() { return '111.0'; } });
+  const s = mk(); const skdm = await new GroupSessionBuilder(s).create(name);
+  const r = mk(); await new GroupSessionBuilder(r).process(name, new SenderKeyDistributionMessage(null, null, null, null, skdm.serialize()));
+  const ct = await new GroupCipher(s, name).encrypt(Buffer.from('hola grupo'));
+  assert.equal(Buffer.from(await new GroupCipher(r, name).decrypt(Buffer.from(ct))).toString(), 'hola grupo');
+});
+
+console.log('# media');
+await test('cifrado de media + MAC', async () => {
+  const { encryptMedia, getMediaKeys } = await import('../src/core/media.js');
+  const plain = Buffer.from('contenido '.repeat(30));
+  const enc = encryptMedia(plain, 'image');
+  const { iv, cipherKey, macKey } = getMediaKeys(enc.mediaKey, 'image');
+  const ct = enc.body.subarray(0, enc.body.length - 10);
+  const mac = enc.body.subarray(enc.body.length - 10);
+  assert.equal(Buffer.compare(mac, crypto.createHmac('sha256', macKey).update(Buffer.concat([iv, ct])).digest().subarray(0, 10)), 0);
+  const d = crypto.createDecipheriv('aes-256-cbc', cipherKey, iv);
+  assert.equal(Buffer.compare(Buffer.concat([d.update(ct), d.final()]), plain), 0);
+});
+
+console.log('# tipos ricos + votos de encuesta');
+await test('protos de mensajes ricos encodean', async () => {
+  for (const o of [
+    { reactionMessage: { key: { id: 'X' }, text: '❤️' } },
+    { locationMessage: { degreesLatitude: 40, degreesLongitude: -3 } },
+    { pollCreationMessageV3: { name: 'C?', options: [{ optionName: 'A' }] } },
+    { extendedTextMessage: { text: 'x', contextInfo: { mentionedJid: ['9@s.whatsapp.net'] } } },
+  ]) { const T = type('Message'); assert.ok(T.decode(encode('Message', o))); }
+});
+await test('descifrado de voto de encuesta', async () => {
+  const { hmacSha256, aesGcmEncrypt, sha256, randomBytes } = await import('../src/protocol/crypto.js');
+  const { newAuthState } = await import('../src/core/auth.js');
+  const { Session } = await import('../src/core/Session.js');
+  const secret = randomBytes(32); const pollId = 'P1'; const creator = '111@s.whatsapp.net'; const voter = '222@s.whatsapp.net';
+  const sel = sha256(Buffer.from('Azul'));
+  const sign = Buffer.concat([Buffer.from(pollId), Buffer.from(creator), Buffer.from(voter), Buffer.from('Poll Vote'), Buffer.from([1])]);
+  const decKey = hmacSha256(hmacSha256(Buffer.alloc(32), secret), sign);
+  const iv = randomBytes(12);
+  const enc = aesGcmEncrypt(encode('PollVoteMessage', { selectedOptions: [sel] }), decKey, iv, Buffer.from(`${pollId}\0${voter}`));
+  const a = newAuthState(); a.me = { id: '111:1@s.whatsapp.net' };
+  const sess = new Session('t', a, { sessionsDir: '.' }); sess.polls.set(pollId, { secret, options: ['Rojo', 'Azul'], creator: a.me.id });
+  const out = await sess.decryptPollVote({ pollCreationMessageKey: { id: pollId }, vote: { encPayload: enc, encIv: iv } }, voter);
+  assert.deepEqual(out, ['Azul']);
+});
+
+console.log('# app state (LTHash)');
+await test('LTHash add/sub identidad + SyncdPatch válido', async () => {
+  const { subtractThenAdd, newLTHashState, encodeSyncdPatch } = await import('../src/core/appstate.js');
+  const { randomBytes } = await import('../src/protocol/crypto.js');
+  const base = Buffer.alloc(128); const mac = randomBytes(32);
+  assert.equal(Buffer.compare(subtractThenAdd(subtractThenAdd(base, [mac], []), [], [mac]), base), 0);
+  const { patch } = encodeSyncdPatch(newLTHashState(), 'regular_low', randomBytes(18).toString('base64'), randomBytes(32),
+    { index: ['star', '1@s.whatsapp.net', 'M1', '0', '0'], value: { starAction: { starred: true } }, operation: 0, apiVersion: 2 });
+  assert.ok(type('SyncdPatch').decode(encode('SyncdPatch', patch)));
+});
+
+console.log(`\n${passed} tests OK${process.exitCode ? ' (con fallos)' : ''}`);

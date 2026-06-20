@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+// Protos SERIALIZADOS de sender keys (distintos del SenderKeyDistributionMessage
+// "envuelto" de wa.proto). Se cargan aparte para evitar el choque de nombres.
+
+message SenderKeyMessage {
+  optional uint32 id = 1;
+  optional uint32 iteration = 2;
+  optional bytes ciphertext = 3;
+}
+
+message SenderKeyDistributionMessage {
+  optional uint32 id = 1;
+  optional uint32 iteration = 2;
+  optional bytes chainKey = 3;
+  optional bytes signingKey = 4;
+}
