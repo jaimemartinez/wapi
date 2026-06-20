@@ -47,6 +47,19 @@ export function registerMessageRoutes(router, manager) {
   // Borrar para mí.  { jid, key:{id,fromMe}, timestamp? }
   sendAction('/sessions/:id/messages/deleteforme', (s, b) => s.deleteMessageForMe(b.jid, b.key, b.timestamp));
 
+  // Botones (legacy).  { to, text, footer?, buttons:[{id,text}] }
+  sendAction('/sessions/:id/messages/buttons', (s, b) => s.sendButtons(b.to, b, b.options || {}));
+  // Lista (legacy).  { to, title, description, buttonText, footer?, sections:[{title,rows:[{id,title,description}]}] }
+  sendAction('/sessions/:id/messages/list', (s, b) => s.sendList(b.to, b, b.options || {}));
+  // Interactivo moderno (native flow).  { to, title?, body?, footer?, buttons:[{name,params}] }
+  sendAction('/sessions/:id/messages/interactive', (s, b) => s.sendInteractive(b.to, b, b.options || {}));
+  // Fijar/desfijar mensaje en el chat.  { to, key:{id,fromMe,participant?}, pin?, seconds? }
+  sendAction('/sessions/:id/messages/pin', (s, b) => s.pinMessage(b.to, b.key, b.pin !== false, b.seconds));
+  // Mantener/no-mantener mensaje efímero.  { to, key, keep? }
+  sendAction('/sessions/:id/messages/keep', (s, b) => s.keepMessage(b.to, b.key, b.keep !== false));
+  // Recibo 'played' (audio/ptt escuchado).  { to, ids:[...], participant? }
+  sendAction('/sessions/:id/receipts/played', (s, b) => s.sendPlayedReceipt(b.to, b.ids, b.participant));
+
   // App state de chats.  { archived?/pinned?/read?/until? }
   sendAction('/sessions/:id/chats/:jid/archive', (s, b, p) => s.archiveChat(p.jid, b.archived !== false));
   sendAction('/sessions/:id/chats/:jid/pin', (s, b, p) => s.pinChat(p.jid, b.pinned !== false));
@@ -161,6 +174,19 @@ export function registerMessageRoutes(router, manager) {
   groupAction('/sessions/:id/groups/accept', (s, p, b) => s.groupAcceptInvite(b.code));
   // Salir del grupo.
   groupAction('/sessions/:id/groups/:gid/leave', (s, p) => s.groupLeave(p.gid));
+  // Mensajes efímeros.  { seconds:0|86400|604800|7776000 }
+  groupAction('/sessions/:id/groups/:gid/ephemeral', (s, p, b) => s.groupEphemeral(p.gid, b.seconds));
+  // Solicitudes de unión: listar / aprobar-rechazar { participants, action:"approve|reject" }
+  groupAction('/sessions/:id/groups/:gid/requests', (s, p) => s.groupJoinRequests(p.gid).then((r) => ({ requests: r })));
+  groupAction('/sessions/:id/groups/:gid/requests/update', (s, p, b) => s.groupJoinRequestsUpdate(p.gid, b.participants || [], b.action).then((r) => ({ result: r })));
+  // Modo de añadir miembros { mode:"all_member_add|admin_add" } y de aprobación { mode:"on|off" }.
+  groupAction('/sessions/:id/groups/:gid/addmode', (s, p, b) => s.groupAddMode(p.gid, b.mode));
+  groupAction('/sessions/:id/groups/:gid/approvalmode', (s, p, b) => s.groupApprovalMode(p.gid, b.mode));
+  // Comunidades.
+  groupAction('/sessions/:id/communities', (s, p, b) => s.communityCreate(b.subject, b.body || ''));               // crear { subject, body? }
+  groupAction('/sessions/:id/communities/:gid/link', (s, p, b) => s.communityLink(p.gid, b.groupJid));             // enlazar sub-grupo
+  groupAction('/sessions/:id/communities/:gid/unlink', (s, p, b) => s.communityUnlink(p.gid, b.groupJid));
+  groupAction('/sessions/:id/communities/:gid/subgroups', (s, p) => s.communitySubgroups(p.gid).then((r) => ({ subgroups: r })));
 
   // Newsletters / Canales.
   groupAction('/sessions/:id/newsletters', (s, p, b) => s.newsletterCreate(b.name, b.description));               // crear { name, description? }

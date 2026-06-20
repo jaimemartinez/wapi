@@ -28,4 +28,13 @@ export function registerProfileRoutes(router, manager) {
   action('get', '/sessions/:id/privacy', (s) => s.privacySettings());
   // Cambiar privacidad.  POST { name, value }
   action('post', '/sessions/:id/privacy', (s, b) => s.setPrivacy(b.name, b.value));
+
+  // Lista de bloqueados.  GET
+  action('get', '/sessions/:id/blocklist', (s) => s.blocklist().then((r) => ({ blocklist: r })));
+  // Bloquear.  POST { jid }
+  action('post', '/sessions/:id/block', (s, b) => s.blockUser(b.jid));
+  // Desbloquear.  POST { jid }
+  action('post', '/sessions/:id/unblock', (s, b) => s.unblockUser(b.jid));
+  // Publicar estado/historia de texto.  POST { text, statusJidList:[...], font?, backgroundArgb?, textArgb? }
+  action('post', '/sessions/:id/status', (s, b) => s.setTextStatus(b.text || '', b.statusJidList || [], b));
 }

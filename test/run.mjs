@@ -125,6 +125,22 @@ await test('descifrado de voto de encuesta', async () => {
   assert.deepEqual(out, ['Azul']);
 });
 
+console.log('# LID (mapeo + conversión)');
+await test('mapeo PN<->LID con device + migración de sesión', async () => {
+  const { storeLIDPNMappings, getLIDForPN, getPNForLID, migrateSession, extractAddressingContext } = await import('../src/core/lid.js');
+  const auth = { lidMapping: { pnToLid: {}, lidToPn: {} }, sessions: {} };
+  assert.equal(storeLIDPNMappings(auth, [{ lid: '888@lid', pn: '34600111222@s.whatsapp.net' }]), 1);
+  assert.equal(storeLIDPNMappings(auth, [{ lid: '888@lid', pn: '34600111222@s.whatsapp.net' }]), 0); // duplicado
+  assert.equal(getLIDForPN(auth, '34600111222:5@s.whatsapp.net'), '888:5@lid'); // device transportado
+  assert.equal(getPNForLID(auth, '888:7@lid'), '34600111222:7@s.whatsapp.net');
+  assert.equal(storeLIDPNMappings(auth, [{ lid: '1@s.whatsapp.net', pn: '2@s.whatsapp.net' }]), 0); // (PN,PN) inválido
+  auth.sessions['34600111222.5'] = 'REC';
+  assert.ok(migrateSession(auth, '34600111222:5@s.whatsapp.net', '888:5@lid'));
+  assert.equal(auth.sessions['888.5'], 'REC'); // record migrado al address LID
+  const ctx = extractAddressingContext({ addressing_mode: 'lid', participant_pn: '34600111222@s.whatsapp.net' }, '888@lid');
+  assert.equal(ctx.addressingMode, 'lid'); assert.equal(ctx.senderAlt, '34600111222@s.whatsapp.net');
+});
+
 console.log('# app state (LTHash)');
 await test('LTHash add/sub identidad + SyncdPatch válido', async () => {
   const { subtractThenAdd, newLTHashState, encodeSyncdPatch } = await import('../src/core/appstate.js');
@@ -134,6 +150,32 @@ await test('LTHash add/sub identidad + SyncdPatch válido', async () => {
   const { patch } = encodeSyncdPatch(newLTHashState(), 'regular_low', randomBytes(18).toString('base64'), randomBytes(32),
     { index: ['star', '1@s.whatsapp.net', 'M1', '0', '0'], value: { starAction: { starred: true } }, operation: 0, apiVersion: 2 });
   assert.ok(type('SyncdPatch').decode(encode('SyncdPatch', patch)));
+});
+await test('App State recepción: encode patch -> decode mutación (roundtrip)', async () => {
+  const { encodeSyncdPatch, newLTHashState, extractSyncdPatches, decodeCollection } = await import('../src/core/appstate.js');
+  const { randomBytes } = await import('../src/protocol/crypto.js');
+  const keyId = randomBytes(18).toString('base64'); const keyData = randomBytes(32);
+  const { patch } = encodeSyncdPatch(newLTHashState(), 'regular_low', keyId, keyData,
+    { index: ['archive', '1@s.whatsapp.net'], value: { archiveChatAction: { archived: true } }, operation: 0, apiVersion: 3 });
+  const iq = { tag: 'iq', attrs: {}, content: [{ tag: 'sync', attrs: {}, content: [
+    { tag: 'collection', attrs: { name: 'regular_low', version: '1', has_more_patches: 'false' }, content: [
+      { tag: 'patches', attrs: {}, content: [{ tag: 'patch', attrs: {}, content: encode('SyncdPatch', patch) }] }] }] }] };
+  const col = extractSyncdPatches(iq).find((c) => c.name === 'regular_low');
+  const { mutations } = await decodeCollection(col, newLTHashState(), (b) => (b === keyId ? keyData : null));
+  assert.deepEqual(mutations[0].index, ['archive', '1@s.whatsapp.net']);
+  assert.equal(mutations[0].syncAction.value.archiveChatAction.archived, true);
+});
+
+console.log('# mensajes interactivos');
+await test('botones/lista/interactivo/pin/keep encodean', async () => {
+  const cases = {
+    buttonsMessage: { contentText: 'Hi', buttons: [{ buttonId: 'b', buttonText: { displayText: 'Sí' }, type: 1 }] },
+    listMessage: { title: 'T', buttonText: 'Ver', listType: 1, sections: [{ title: 'S', rows: [{ title: 'r', rowId: '1' }] }] },
+    interactiveMessage: { body: { text: 'b' }, nativeFlowMessage: { messageVersion: 1, buttons: [{ name: 'quick_reply', buttonParamsJson: '{}' }] } },
+    pinInChatMessage: { key: { id: 'M' }, type: 1 },
+    keepInChatMessage: { key: { id: 'M' }, keepType: 1 },
+  };
+  for (const [k, v] of Object.entries(cases)) assert.ok(type('Message').decode(encode('Message', { [k]: v }))[k] != null, k);
 });
 
 console.log(`\n${passed} tests OK${process.exitCode ? ' (con fallos)' : ''}`);

@@ -58,6 +58,24 @@ export function isPnUser(jid) {
   return typeof jid === 'string' && jid.endsWith(`@${S_WHATSAPP_NET}`);
 }
 
+// Reconstruye el JID LID device-specific de un PN dado su lidUser. El device se
+// COPIA del PN; device 99 => dominio hosted.lid.
+export function pnToLidJid(pn, lidUser) {
+  const d = jidDecode(pn);
+  if (!d || !lidUser) return undefined;
+  const server = d.server === 'hosted' || d.device === 99 ? 'hosted.lid' : 'lid';
+  return jidEncode(lidUser, server, d.device);
+}
+
+// Reconstruye el JID PN device-specific de un LID dado su pnUser. El device se
+// COPIA del LID; hosted.lid (domainType 129) => dominio hosted.
+export function lidToPnJid(lid, pnUser) {
+  const d = jidDecode(lid);
+  if (!d || !pnUser) return undefined;
+  const server = d.domainType === 129 ? 'hosted' : S_WHATSAPP_NET;
+  return jidEncode(pnUser, server, d.device);
+}
+
 // Normaliza un número/identificador del usuario a un JID de WhatsApp.
 export function toWhatsAppJid(input) {
   if (typeof input !== 'string') throw new Error('jid inválido');

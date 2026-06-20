@@ -177,6 +177,118 @@ message Message {
   optional FutureProofMessage view_once_message_v2 = 55;
   optional PollCreationMessage poll_creation_message_v2 = 60;
   optional PollCreationMessage poll_creation_message_v3 = 64;
+  optional TemplateMessage template_message = 25;
+  optional ProductMessage product_message = 30;
+  optional ListMessage list_message = 36;
+  optional ButtonsMessage buttons_message = 42;
+  optional InteractiveMessage interactive_message = 45;
+  optional KeepInChatMessage keep_in_chat_message = 51;
+  optional PinInChatMessage pin_in_chat_message = 63;
+}
+
+// ---- Mensajes interactivos ----
+message ButtonsMessage {
+  optional string content_text = 6;
+  optional string footer_text = 7;
+  optional ContextInfo context_info = 8;
+  repeated Button buttons = 9;
+  optional int32 header_type = 10;
+  message Button {
+    optional string button_id = 1;
+    optional ButtonText button_text = 2;
+    optional int32 type = 3;
+    message ButtonText { optional string display_text = 1; }
+  }
+}
+message ListMessage {
+  optional string title = 1;
+  optional string description = 2;
+  optional string button_text = 3;
+  optional int32 list_type = 4;
+  repeated Section sections = 5;
+  optional string footer_text = 7;
+  optional ContextInfo context_info = 8;
+  message Section {
+    optional string title = 1;
+    repeated Row rows = 2;
+    message Row {
+      optional string title = 1;
+      optional string description = 2;
+      optional string row_id = 3;
+    }
+  }
+}
+message TemplateMessage {
+  optional ContextInfo context_info = 3;
+  optional HydratedFourRowTemplate hydrated_template = 4;
+  optional string template_id = 9;
+  message HydratedFourRowTemplate {
+    optional string hydrated_title_text = 2;
+    optional string hydrated_content_text = 6;
+    optional string hydrated_footer_text = 7;
+    repeated HydratedTemplateButton hydrated_buttons = 8;
+    optional string template_id = 9;
+  }
+}
+message HydratedTemplateButton {
+  optional uint32 index = 4;
+  optional HydratedQuickReplyButton quick_reply_button = 1;
+  optional HydratedURLButton url_button = 2;
+  optional HydratedCallButton call_button = 3;
+  message HydratedQuickReplyButton { optional string display_text = 1; optional string id = 2; }
+  message HydratedURLButton { optional string display_text = 1; optional string url = 2; }
+  message HydratedCallButton { optional string display_text = 1; optional string phone_number = 2; }
+}
+message InteractiveMessage {
+  optional Header header = 1;
+  optional Body body = 2;
+  optional Footer footer = 3;
+  optional NativeFlowMessage native_flow_message = 6;
+  optional ContextInfo context_info = 15;
+  message Header {
+    optional string title = 1;
+    optional string subtitle = 2;
+    optional bool has_media_attachment = 5;
+    optional ImageMessage image_message = 4;
+    optional bytes jpeg_thumbnail = 6;
+  }
+  message Body { optional string text = 1; }
+  message Footer { optional string text = 1; }
+  message NativeFlowMessage {
+    repeated NativeFlowButton buttons = 1;
+    optional string message_params_json = 2;
+    optional int32 message_version = 3;
+    message NativeFlowButton {
+      optional string name = 1;
+      optional string button_params_json = 2;
+    }
+  }
+}
+message ProductMessage {
+  optional ProductSnapshot product = 1;
+  optional string business_owner_jid = 2;
+  optional string body = 5;
+  optional string footer = 6;
+  optional ContextInfo context_info = 17;
+  message ProductSnapshot {
+    optional string product_id = 2;
+    optional string title = 3;
+    optional string description = 4;
+    optional string currency_code = 5;
+    optional int64 price_amount1000 = 6;
+    optional string retailer_id = 7;
+    optional string url = 8;
+  }
+}
+message PinInChatMessage {
+  optional MessageKey key = 1;
+  optional int32 type = 2;
+  optional int64 sender_timestamp_ms = 3;
+}
+message KeepInChatMessage {
+  optional MessageKey key = 1;
+  optional int32 keep_type = 2;
+  optional int64 timestamp_ms = 3;
 }
 
 // Contexto compartido por casi todos los tipos: cita, menciones, expiración.
@@ -212,6 +324,9 @@ message ExtendedTextMessage {
   optional string canonical_url = 4;
   optional string description = 5;
   optional string title = 6;
+  optional fixed32 text_argb = 7;
+  optional fixed32 background_argb = 8;
+  optional int32 font = 9;
   optional int32 preview_type = 10;
   optional bytes jpeg_thumbnail = 16;
   optional ContextInfo context_info = 17;
@@ -284,6 +399,7 @@ message PollVoteMessage {
 
 message MessageContextInfo {
   optional bytes message_secret = 3;
+  optional int64 message_add_on_duration_in_secs = 5;
 }
 
 message FutureProofMessage {
@@ -437,13 +553,24 @@ message SyncActionData {
 message SyncActionValue {
   optional int64 timestamp = 1;
   optional StarAction star_action = 2;
+  optional ContactAction contact_action = 3;
   optional MuteAction mute_action = 4;
   optional PinAction pin_action = 5;
+  optional PushNameSetting push_name_setting = 7;
   optional ArchiveChatAction archive_chat_action = 17;
   optional DeleteMessageForMeAction delete_message_for_me_action = 18;
   optional MarkChatAsReadAction mark_chat_as_read_action = 20;
   optional DeleteChatAction delete_chat_action = 22;
 }
+message ContactAction {
+  optional string full_name = 1;
+  optional string first_name = 2;
+  optional string lid_jid = 3;
+  optional bool save_on_primary_addressbook = 4;
+  optional string pn_jid = 5;
+  optional string username = 6;
+}
+message PushNameSetting { optional string name = 1; }
 message StarAction { optional bool starred = 1; }
 message MuteAction { optional bool muted = 1; optional int64 mute_end_timestamp = 2; }
 message PinAction { optional bool pinned = 1; }

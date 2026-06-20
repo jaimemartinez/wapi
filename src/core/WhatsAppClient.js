@@ -15,6 +15,9 @@ import { loadProto, encode as protoEncode, decode as protoDecode } from './proto
 import { registrationPayload, loginPayload } from './payload.js';
 import { configureSuccessfulPairing, child } from './pairing.js';
 import { generatePreKeys } from './auth.js';
+import { storeLIDPNMappings, migrateSession } from './lid.js';
+import { generatePairingCode, buildHelloNode, buildFinishBundle, buildFinishNode } from './pairing-code.js';
+import { jidEncode, jidDecode } from '../protocol/binary/jid.js';
 import { encodeBigEndian } from './receipts.js';
 
 export class WhatsAppClient extends EventEmitter {
@@ -107,8 +110,10 @@ export class WhatsAppClient extends EventEmitter {
       const encStatic = this.noise.encrypt(this.auth.noiseKey.public);
       this.noise.mixDH(this.auth.noiseKey.private, serverEph);
 
-      // ClientPayload: login si ya estamos emparejados, registro si no.
-      const payload = this.auth.me ? loginPayload(this.auth) : registrationPayload(this.auth, this.config.client.name);
+      // ClientPayload: login si ya estamos registrados, registro si no. Usamos
+      // `registered`/`account` (no `me`), porque el flujo por código pre-rellena
+      // me.id antes del finish y aún debe enviar registrationPayload.
+      const payload = (this.auth.registered || this.auth.account) ? loginPayload(this.auth) : registrationPayload(this.auth, this.config.client.name);
       const encPayload = this.noise.encrypt(payload);
 
       const finish = protoEncode('HandshakeMessage', {
@@ -168,6 +173,21 @@ export class WhatsAppClient extends EventEmitter {
 
   // ---- Emparejamiento (registro) ----
 
+  // Solicita un código de 8 caracteres para teclear en el móvil (alternativa al
+  // QR). phone = número en formato internacional sin '+'. Devuelve el código.
+  async requestPairingCode(phone, customCode) {
+    if (customCode && customCode.length !== 8) throw new Error('el código debe tener 8 caracteres');
+    const code = (customCode || generatePairingCode()).toUpperCase();
+    this.auth.pairingCode = code;
+    // Pre-fijamos me.id (provisional); el pair-success posterior lo sobrescribe.
+    this.auth.me = { id: jidEncode(String(phone).replace(/[^0-9]/g, ''), 's.whatsapp.net'), name: '~' };
+    const hello = buildHelloNode(this.auth, String(phone).replace(/[^0-9]/g, ''), code);
+    hello.attrs.id = this.nextId();
+    await this.sendIq(hello);
+    this.emit('creds');
+    return code;
+  }
+
   onPairDevice(iq, pairDevice) {
     // <pair-device> contiene uno o varios <ref>…</ref>. El QR usa el primero;
     // los demás sirven para refrescarlo cuando caduca (~20s).
@@ -225,6 +245,13 @@ export class WhatsAppClient extends EventEmitter {
   onLoginSuccess(node) {
     this.status = 'connected';
     this.qr = null;
+    // me.lid llega en el <success lid="...@lid">: registramos nuestro propio
+    // mapeo PN<->LID y migramos la sesión Signal al address LID.
+    if (node.attrs?.lid && this.auth?.me) {
+      this.auth.me.lid = node.attrs.lid;
+      storeLIDPNMappings(this.auth, [{ lid: node.attrs.lid, pn: this.auth.me.id }]);
+      migrateSession(this.auth, this.auth.me.id, node.attrs.lid);
+    }
     this.startKeepalive();
     this.emit('open');
     // Inicialización post-login: subir pre-keys y marcar la sesión activa. Sin
@@ -281,10 +308,46 @@ export class WhatsAppClient extends EventEmitter {
           await this.uploadPreKeys(20).catch(() => {}).finally(() => { this.uploadingPreKeys = false; });
         }
       }
+      // Finalización del emparejamiento por código: el primario respondió.
+      if (node.attrs.type === 'companion_reg' || child(node, 'link_code_companion_reg')) {
+        await this.onCompanionReg(node).catch((e) => console.error(`[client] companion_reg:`, e.message));
+      }
+      // Cambio en la lista de dispositivos de un usuario: limpiamos sesiones
+      // Signal de los que se retiran (no cacheamos device-list, re-fetcheamos).
+      if (node.attrs.type === 'devices') this.onDevicesNotification(node);
       this.emit('notification', node);
     } finally {
       this.ack(node);
     }
+  }
+
+  // Maneja <notification type="devices">: si un usuario retira dispositivos,
+  // borramos sus sesiones Signal muertas. No cacheamos device-list (cada envío
+  // re-consulta USync), así que add/update no requieren acción.
+  onDevicesNotification(node) {
+    const change = (node.content || []).find((n) => ['add', 'remove', 'update'].includes(n.tag));
+    if (!change || change.tag !== 'remove') return;
+    for (const d of (child(change, 'device-list')?.content || change.content || [])) {
+      const jid = d.attrs?.jid;
+      if (!jid) continue;
+      const dec = jidDecode(jid);
+      if (dec) delete this.auth.sessions[`${dec.user}.${dec.device || 0}`];
+    }
+  }
+
+  // Maneja <notification><link_code_companion_reg stage="companion_finish">.
+  async onCompanionReg(node) {
+    const reg = child(node, 'link_code_companion_reg');
+    if (!reg || !this.auth.pairingCode) return;
+    const ref = child(reg, 'link_code_pairing_ref')?.content;
+    const primaryIdentityPub = child(reg, 'primary_identity_pub')?.content;
+    const wrappedPrimaryEph = child(reg, 'link_code_pairing_wrapped_primary_ephemeral_pub')?.content;
+    if (!primaryIdentityPub || !wrappedPrimaryEph) return;
+    const { wrappedKeyBundle, advSecretKey } = buildFinishBundle(this.auth, this.auth.pairingCode, Buffer.from(primaryIdentityPub), Buffer.from(wrappedPrimaryEph));
+    await this.sendIq(buildFinishNode(this.auth, ref, wrappedKeyBundle));
+    this.auth.advSecretKey = advSecretKey; // Buffer crudo (pairing.js hace HMAC con él)
+    this.auth.registered = true;
+    this.emit('pairing-registered');
   }
 
   // Ping periódico al servidor para mantener viva la sesión (cada 30s).

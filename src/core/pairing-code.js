@@ -79,4 +79,21 @@ export function buildHelloNode(auth, phone, code) {
   };
 }
 
+// Nodo <link_code_companion_reg stage="companion_finish"> con el key-bundle.
+export function buildFinishNode(auth, ref, wrappedKeyBundle) {
+  return {
+    tag: 'iq',
+    attrs: { to: 's.whatsapp.net', type: 'set', xmlns: 'md', id: undefined },
+    content: [{
+      tag: 'link_code_companion_reg',
+      attrs: { jid: auth.me.id, stage: 'companion_finish' },
+      content: [
+        { tag: 'link_code_pairing_wrapped_key_bundle', attrs: {}, content: wrappedKeyBundle },
+        { tag: 'companion_identity_public', attrs: {}, content: auth.signedIdentityKey.public },
+        { tag: 'link_code_pairing_ref', attrs: {}, content: ref },
+      ],
+    }],
+  };
+}
+
 void gcmIv; // (reservado: el IV de GCM aquí es aleatorio de 12B, no por contador)

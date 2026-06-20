@@ -15,7 +15,10 @@ export async function usyncDevices(client, jids) {
       tag: 'usync',
       attrs: { context: 'message', mode: 'query', sid: client.nextId(), last: 'true', index: '0' },
       content: [
-        { tag: 'query', attrs: {}, content: [{ tag: 'devices', attrs: { version: '2' }, content: undefined }] },
+        { tag: 'query', attrs: {}, content: [
+          { tag: 'devices', attrs: { version: '2' }, content: undefined },
+          { tag: 'lid', attrs: {}, content: undefined }, // pedimos también el LID de cada usuario
+        ] },
         { tag: 'list', attrs: {}, content: userNodes },
       ],
     }],
@@ -24,9 +27,12 @@ export async function usyncDevices(client, jids) {
   const usync = child(res, 'usync');
   const list = usync && child(usync, 'list');
   const out = [];
+  const lidPairs = []; // [{ pn, lid }] descubiertos en la misma query
   for (const userNode of (list?.content || [])) {
     if (userNode.tag !== 'user') continue;
     const user = jidDecode(userNode.attrs.jid)?.user;
+    const lidVal = child(userNode, 'lid')?.attrs?.val;
+    if (lidVal && userNode.attrs.jid) lidPairs.push({ pn: userNode.attrs.jid, lid: lidVal });
     const devices = child(userNode, 'devices');
     const deviceList = devices && child(devices, 'device-list');
     for (const d of (deviceList?.content || [])) {
@@ -35,5 +41,6 @@ export async function usyncDevices(client, jids) {
       out.push({ user, device, jid: jidEncode(user, S_WHATSAPP_NET, device || undefined) });
     }
   }
+  out.lidPairs = lidPairs;
   return out;
 }

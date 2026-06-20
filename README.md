@@ -18,14 +18,21 @@ librerías de terceros para el protocolo.
 ## Funcionalidades
 
 - Emparejamiento por **QR** (imagen PNG auto-refrescante en `/sessions/:id/qr.png`)
+  o por **código de teléfono** (`/sessions/:id/pairing-code`)
 - **Mensajes**: texto, media (imagen/audio/vídeo/documento/sticker), reacciones,
   citas, menciones, ubicación, contactos, encuestas (con descifrado de votos),
   editar, borrar/revocar, reenviar
+- **Mensajes interactivos**: botones, listas, plantillas, native-flow (modernos),
+  productos; **fijar/mantener** mensajes; recibos `played` (audio escuchado)
 - **Grupos**: enviar/recibir (sender keys) + admin (crear, participantes, asunto,
-  descripción, invitaciones, salir)
-- **Recibos** (entrega/lectura/retry), **presencia**, **perfil/contactos/privacidad**
+  descripción, invitaciones, salir), **efímeros**, **solicitudes de unión**
+  (aprobar/rechazar), modo de añadir/aprobación, **comunidades** (crear/enlazar/subgrupos)
+- **Recibos** (entrega/lectura/played/retry), **presencia**, **perfil/contactos/privacidad**
+- **Bloqueos** (bloquear/desbloquear/listar) y **estados/historias** (publicar texto)
 - **Lista de chats** vía history sync, **newsletters/canales**
-- **App State** (archivar/fijar/silenciar/marcar leído/estrella/borrar para mí)
+- **App State bidireccional**: enviar Y recibir (archivar/fijar/silenciar/marcar
+  leído/estrella/borrar) con sincronización de versión y LTHash
+- **LID** (Linked ID): mapeo PN↔LID, migración de sesión Signal, addressing
 - **Llamadas**: detección y rechazo (el audio/vídeo no es posible de forma nativa)
 
 ## Arranque
@@ -54,11 +61,12 @@ Configurable por entorno: `WAPI_PORT` (4000), `WAPI_HOST`, `WAPI_KEY` (cabecera 
 ## Estado y límites (honesto)
 
 El **núcleo del protocolo** (handshake, Signal, sender keys, media, LTHash, códec)
-está verificado byte a byte contra el cliente oficial. **No** es equivalente al 100% a
-librerías maduras: el direccionamiento LID es parcial, la **recepción** de App State
-Sync (snapshots entrantes) no está, el emparejamiento por código no está cableado, y
-faltan cuentas hosted/business y algo de robustez de casos límite. La mayoría de
-funciones están verificadas con tests offline; pruébalas en vivo antes de confiar.
+está verificado byte a byte contra el cliente oficial, y la mayoría de funciones
+están cubiertas por tests offline. Aun así **no** es equivalente al 100% a librerías
+maduras de años: el **emparejamiento por código** está cableado pero **no probado en
+vivo** (requiere un número sin vincular); faltan cuentas **hosted/business**, el
+buffering de eventos y parte de la robustez de casos límite. Prueba cada función en
+vivo antes de confiar en producción.
 
 ## Tests
 

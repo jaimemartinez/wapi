@@ -78,6 +78,12 @@ export function newAuthState() {
     appStateSyncKeys: {}, // base64(keyId) -> base64(keyData 32B) (app state)
     myAppStateKeyId: null,
     appStateVersions: {}, // colección -> { version, hash(base64), indexValueMap }
+
+    // ---- Emparejamiento por código (alternativa al QR) ----
+    pairingEphemeral: generateX25519KeyPair(), // efímera; persiste entre hello y finish
+    pairingCode: null,    // código de 8 chars activo
+    registered: false,    // true tras companion_finish (decide login vs registro)
+    lidMapping: { pnToLid: {}, lidToPn: {} }, // mapeo LID<->PN a nivel usuario
   };
 }
 

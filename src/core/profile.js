@@ -100,3 +100,16 @@ export async function updatePrivacySetting(client, name, value) {
     content: [{ tag: 'privacy', attrs: {}, content: [{ tag: 'category', attrs: { name, value }, content: undefined }] }] });
   return { ok: true };
 }
+
+// Lista de contactos bloqueados.
+export async function fetchBlocklist(client) {
+  const res = await client.sendIq({ tag: 'iq', attrs: { to: S_WHATSAPP_NET, type: 'get', xmlns: 'blocklist', id: client.nextId() }, content: undefined });
+  return children(child(res, 'list'), 'item').map((i) => i.attrs.jid);
+}
+
+// Bloquea o desbloquea un contacto. action: 'block' | 'unblock'.
+export async function updateBlockStatus(client, jid, action) {
+  await client.sendIq({ tag: 'iq', attrs: { to: S_WHATSAPP_NET, type: 'set', xmlns: 'blocklist', id: client.nextId() },
+    content: [{ tag: 'item', attrs: { action, jid: jidNormalizedUser(jid) }, content: undefined }] });
+  return { ok: true, jid, action };
+}

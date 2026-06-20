@@ -7,20 +7,26 @@ import { SignalStore } from './signal/store.js';
 import { processPreKeyBundle, encryptSignalMessage, decryptSignalMessage, jidToAddr,
   encryptGroupMessage, decryptGroupMessage, processSenderKeyDistributionMessage } from './signal/repository.js';
 import { groupMetadata, groupCreate, groupParticipantsUpdate, groupUpdateSubject, groupUpdateDescription,
-  groupSettingUpdate, groupInviteCode, groupRevokeInvite, groupAcceptInvite, groupGetInviteInfo, groupLeave } from './groups.js';
+  groupSettingUpdate, groupInviteCode, groupRevokeInvite, groupAcceptInvite, groupGetInviteInfo, groupLeave,
+  groupToggleEphemeral, groupRequestParticipantsList, groupRequestParticipantsUpdate, groupMemberAddMode,
+  groupJoinApprovalMode, communityCreate, communityLinkGroup, communityUnlinkGroup, getSubgroups } from './groups.js';
 import { onWhatsApp, fetchStatus, profilePictureUrl, updateProfilePicture, removeProfilePicture,
-  updateProfileStatus, getBusinessProfile, fetchPrivacySettings, updatePrivacySetting } from './profile.js';
+  updateProfileStatus, getBusinessProfile, fetchPrivacySettings, updatePrivacySetting,
+  fetchBlocklist, updateBlockStatus } from './profile.js';
 import { newsletterCreate, newsletterFollow, newsletterUnfollow, newsletterMetadata,
   newsletterMute, newsletterUnmute, newsletterDelete, newsletterUpdate } from './newsletters.js';
 import { child } from './pairing.js';
-import { encodeSyncdPatch, newLTHashState } from './appstate.js';
+import { encodeSyncdPatch, newLTHashState, extractSyncdPatches, decodeCollection } from './appstate.js';
+
+const APP_STATE_COLLECTIONS = ['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'];
 import { parseMessageStanza, parsePreKeyBundles, detectMedia } from './messages.js';
 import { processHistorySync } from './history.js';
 import { encryptMedia, uploadMedia, downloadEncryptedMedia } from './media.js';
 import { randomBytes as signalRandom, hmacSha256, aesGcmDecrypt, sha256 } from '../protocol/crypto.js';
 import { usyncDevices } from './devices.js';
 import { buildRetryReceipt, parseRetryKeys, RetryCounter } from './receipts.js';
-import { toWhatsAppJid, jidDecode, jidNormalizedUser, isJidGroup } from '../protocol/binary/jid.js';
+import { toWhatsAppJid, jidDecode, jidNormalizedUser, isJidGroup, isLidUser } from '../protocol/binary/jid.js';
+import { storeLIDPNMappings, getLIDForPN, getPNForLID, migrateSession, extractAddressingContext } from './lid.js';
 import { loadProto, encode as protoEncode, decode as protoDecode } from './proto.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -160,6 +166,15 @@ export class Session {
       await this.persist();
     });
 
+    // Emparejamiento por código completado (companion_finish): el servidor
+    // cerrará el stream (515); reconectamos como login (igual que el QR).
+    this.client.on('pairing-registered', async () => {
+      console.error(`[session ${this.id}] ✅ pairing-code registrado; reconectando como login`);
+      this.pairingCode = null;
+      this.reconnectAfterPair = true;
+      await this.persist();
+    });
+
     // Registro de llamadas entrantes (detección; el audio no está soportado).
     this.client.on('call', (node) => {
       const offer = (node.content || []).find((n) => n.tag === 'offer') || node;
@@ -199,6 +214,18 @@ export class Session {
 
     const isGroup = isJidGroup(parsed.from);
     const author = parsed.participant || parsed.from; // autor real (grupos)
+
+    // Ingesta de mapeo LID<->PN del contexto de direccionamiento del stanza.
+    const addr = extractAddressingContext(node.attrs, author);
+    if (addr.senderAlt) {
+      const pair = addr.addressingMode === 'lid' ? { lid: author, pn: addr.senderAlt } : { lid: addr.senderAlt, pn: author };
+      if (storeLIDPNMappings(this.auth, [pair])) {
+        const lidJid = isLidUser(author) ? author : addr.senderAlt;
+        const pnJid = isLidUser(author) ? addr.senderAlt : author;
+        migrateSession(this.auth, pnJid, lidJid); // doble-ratchet sigue al LID
+        this.scheduleSaveState();
+      }
+    }
 
     // Descifrar (skmsg de grupo o 1:1); si falla, pedir reenvío (retry) y salir.
     let plain;
@@ -243,7 +270,9 @@ export class Session {
         this.auth.myAppStateKeyId = id;
       }
       await this.persist();
-      console.error(`[session ${this.id}] app-state keys recibidas (${keyShare.keys.length})`);
+      console.error(`[session ${this.id}] app-state keys recibidas (${keyShare.keys.length}); sincronizando…`);
+      // Ya podemos descodificar: sincronizamos todas las colecciones una vez.
+      if (!this.appStateSynced) { this.appStateSynced = true; this.resyncAppState(APP_STATE_COLLECTIONS, true).catch((e) => console.error(`[session ${this.id}] resync inicial:`, e.message)); }
     }
 
     // Recibo de ENTREGA al remitente (doble check gris).
@@ -457,6 +486,7 @@ export class Session {
     const recipUser = jidDecode(recipientJid).user;
     const base = (u) => `${u}@s.whatsapp.net`;
     const devices = await usyncDevices(this.client, [...new Set([base(meUser), base(recipUser)])]);
+    if (devices.lidPairs?.length) storeLIDPNMappings(this.auth, devices.lidPairs);
     const targets = devices.map((d) => d.jid).filter((j) => j !== this.auth.me.id);
     if (!targets.length) throw new Error('sin dispositivos destino');
 
@@ -610,6 +640,76 @@ export class Session {
     return this.relayMessage(recipientJid, m, { type });
   }
 
+  // ---- Mensajes interactivos (botones/listas/plantillas/nativos) ----
+
+  // Botones de respuesta rápida (legacy). buttons: [{ id, text }].
+  async sendButtons(to, { text, footer, buttons = [], header }, opts = {}) {
+    const recipientJid = toWhatsAppJid(to);
+    const m = { buttonsMessage: {
+      contentText: text, footerText: footer, headerType: header ? 2 : 1,
+      ...(header ? { contentText: text } : {}),
+      buttons: buttons.map((b) => ({ buttonId: b.id, buttonText: { displayText: b.text }, type: 1 })),
+    } };
+    this.attachContext(m, recipientJid, opts);
+    return this.relayMessage(recipientJid, m);
+  }
+
+  // Lista desplegable (legacy). sections: [{ title, rows:[{ id, title, description }] }].
+  async sendList(to, { title, description, buttonText, footer, sections = [] }, opts = {}) {
+    const recipientJid = toWhatsAppJid(to);
+    const m = { listMessage: {
+      title, description, buttonText, footerText: footer, listType: 1,
+      sections: sections.map((s) => ({ title: s.title, rows: (s.rows || []).map((r) => ({ title: r.title, description: r.description, rowId: r.id })) })),
+    } };
+    this.attachContext(m, recipientJid, opts);
+    return this.relayMessage(recipientJid, m);
+  }
+
+  // Mensaje interactivo moderno (native flow). buttons: [{ name, params }] donde
+  // name ∈ 'quick_reply'|'cta_url'|'cta_call'|'single_select' y params es objeto.
+  async sendInteractive(to, { title, subtitle, body, footer, buttons = [] }, opts = {}) {
+    const recipientJid = toWhatsAppJid(to);
+    const m = { interactiveMessage: {
+      header: title || subtitle ? { title, subtitle, hasMediaAttachment: false } : undefined,
+      body: body ? { text: body } : undefined,
+      footer: footer ? { text: footer } : undefined,
+      nativeFlowMessage: { messageVersion: 1, buttons: buttons.map((b) => ({ name: b.name, buttonParamsJson: typeof b.params === 'string' ? b.params : JSON.stringify(b.params || {}) })) },
+    } };
+    this.attachContext(m, recipientJid, opts);
+    return this.relayMessage(recipientJid, m);
+  }
+
+  // Fija/desfija un mensaje en el chat. key={ id, fromMe, participant? }. pin=true fija.
+  async pinMessage(to, key, pin = true, seconds = 86400) {
+    const recipientJid = toWhatsAppJid(to);
+    const mk = { remoteJid: recipientJid, fromMe: key.fromMe !== false, id: key.id };
+    if (key.participant) mk.participant = key.participant;
+    const m = {
+      pinInChatMessage: { key: mk, type: pin ? 1 : 2, senderTimestampMs: Date.now() },
+      messageContextInfo: { messageAddOnDurationInSecs: pin ? seconds : 0 },
+    };
+    return this.relayMessage(recipientJid, m);
+  }
+
+  // Mantiene/deja de mantener un mensaje efímero. keep=true para guardar.
+  async keepMessage(to, key, keep = true) {
+    const recipientJid = toWhatsAppJid(to);
+    const mk = { remoteJid: recipientJid, fromMe: key.fromMe !== false, id: key.id };
+    if (key.participant) mk.participant = key.participant;
+    const m = { keepInChatMessage: { key: mk, keepType: keep ? 1 : 2, timestampMs: Date.now() } };
+    return this.relayMessage(recipientJid, m);
+  }
+
+  // Recibo 'played' (audio/ptt escuchado). ids = [msgId, ...]. participant en grupo.
+  async sendPlayedReceipt(to, ids, participant) {
+    const toJid = toWhatsAppJid(to);
+    const list = Array.isArray(ids) ? ids : [ids];
+    const attrs = { id: list[0], to: toJid, type: 'played' };
+    if (participant) attrs.participant = participant;
+    this.client.sendReceipt(attrs, list.slice(1));
+    return { ok: true, type: 'played', ids: list };
+  }
+
   // ---- Presencia ----
 
   // Anuncia presencia propia: 'available' | 'unavailable'.
@@ -665,6 +765,7 @@ export class Session {
     const base = (j) => `${jidDecode(j).user}@s.whatsapp.net`;
     const baseJids = [...new Set([base(meId), ...meta.participants.map((p) => base(p.id))])];
     const devices = await usyncDevices(this.client, baseJids);
+    if (devices.lidPairs?.length) storeLIDPNMappings(this.auth, devices.lidPairs);
     const targets = devices.map((d) => d.jid).filter((j) => j !== meId);
 
     // 2. Cifrar el cuerpo con la sender key del grupo (y obtener la SKDM).
@@ -701,12 +802,107 @@ export class Session {
     return { id, to: groupJid, devices: participants.length };
   }
 
+  // Publica un estado/historia (status@broadcast). Igual que un grupo pero la
+  // audiencia es statusJidList (los contactos que verán el estado), no un grupo.
+  // messageObj: objeto Message ya armado (texto/media). statusJidList: string[].
+  async sendStatus(messageObj, statusJidList = []) {
+    if (!this.auth.me) throw new Error('sesión no emparejada');
+    const STATUS = 'status@broadcast';
+    const meId = this.auth.me.id;
+    const base = (j) => `${jidDecode(j).user}@s.whatsapp.net`;
+    const audience = [...new Set([base(meId), ...statusJidList.map(base)])];
+    const devices = await usyncDevices(this.client, audience);
+    if (devices.lidPairs?.length) storeLIDPNMappings(this.auth, devices.lidPairs);
+    const targets = devices.map((d) => d.jid).filter((j) => j !== meId);
+
+    const body = protoEncode('Message', messageObj);
+    const { ciphertext, skdm } = await encryptGroupMessage(this.signal, STATUS, meId, body);
+
+    const need = targets.filter((j) => !this.auth.sessions[this.signalAddr(j)]);
+    if (need.length) {
+      const iq = await this.client.fetchPreKeys(need);
+      for (const { jid, bundle } of parsePreKeyBundles(iq)) {
+        try { await processPreKeyBundle(this.signal, jid, bundle); } catch (e) { console.error(`[session ${this.id}] prekey ${jid}:`, e.message); }
+      }
+    }
+    const skdMsg = protoEncode('Message', { senderKeyDistributionMessage: { groupId: STATUS, axolotlSenderKeyDistributionMessage: skdm } });
+    const participants = [];
+    let includeDeviceIdentity = false;
+    for (const jid of targets) {
+      if (!this.auth.sessions[this.signalAddr(jid)]) continue;
+      const e = await encryptSignalMessage(this.signal, jid, skdMsg);
+      if (e.type === 'pkmsg') includeDeviceIdentity = true;
+      participants.push({ tag: 'to', attrs: { jid }, content: [{ tag: 'enc', attrs: { v: '2', type: e.type }, content: e.ciphertext }] });
+    }
+    const id = this.client.generateMessageId();
+    const content = [
+      { tag: 'enc', attrs: { v: '2', type: 'skmsg' }, content: ciphertext },
+      { tag: 'participants', attrs: {}, content: participants },
+    ];
+    if (includeDeviceIdentity) content.push({ tag: 'device-identity', attrs: {}, content: encodeAccount(this.auth.account) });
+    this.client.sendNode({ tag: 'message', attrs: { id, to: STATUS, type: messageType(messageObj) }, content });
+    return { id, to: STATUS, audience: participants.length };
+  }
+
   // ---- App State (archivar/fijar/silenciar/leer/estrella/borrar para mí) ----
+
+  // Sincroniza colecciones de app state desde el servidor (decodifica snapshots/
+  // patches y aplica los cambios a this.chats). isInitial: tras history sync.
+  async resyncAppState(names = APP_STATE_COLLECTIONS, isInitial = false) {
+    const getKeyData = (b64) => (this.auth.appStateSyncKeys[b64] ? Buffer.from(this.auth.appStateSyncKeys[b64], 'base64') : null);
+    for (const name of names) {
+      const raw = this.auth.appStateVersions[name];
+      let state = raw ? { version: raw.version, hash: Buffer.from(raw.hash, 'base64'), indexValueMap: raw.indexValueMap || {} } : newLTHashState();
+      let hasMore = true; let guard = 0;
+      while (hasMore && guard++ < 10) {
+        const returnSnapshot = state.version === 0;
+        let res;
+        try {
+          res = await this.client.sendIq({ tag: 'iq', attrs: { to: 's.whatsapp.net', type: 'set', xmlns: 'w:sync:app:state', id: this.client.nextId() },
+            content: [{ tag: 'sync', attrs: {}, content: [{ tag: 'collection', attrs: { name, version: String(state.version), return_snapshot: returnSnapshot ? 'true' : 'false' }, content: undefined }] }] });
+        } catch (e) { console.error(`[session ${this.id}] resync ${name}:`, e.message); break; }
+        const col = extractSyncdPatches(res).find((c) => c.name === name);
+        if (!col) break;
+        hasMore = col.hasMorePatches;
+        try {
+          const { state: ns, mutations } = await decodeCollection(col, state, getKeyData);
+          state = ns;
+          for (const m of mutations) this.processSyncAction(m, isInitial);
+        } catch (e) {
+          if (e.isMissingKey) { console.error(`[session ${this.id}] ${name}: falta app-state-key, parkeada`); break; }
+          console.error(`[session ${this.id}] decode ${name}:`, e.message); break;
+        }
+      }
+      this.auth.appStateVersions[name] = { version: state.version, hash: state.hash.toString('base64'), indexValueMap: state.indexValueMap };
+    }
+    await this.persist();
+    this.scheduleSaveState();
+  }
+
+  // Aplica una mutación decodificada a la vista de chats.
+  processSyncAction({ index, syncAction }, isInitial = false) {
+    const [type, jid] = index;
+    const v = syncAction.value || {};
+    if (type === 'deleteChat') { if (!isInitial) this.chats.delete(jid); return; }
+    if (type === 'setting_pushName' || type === 'pushName') { if (v.pushNameSetting?.name && this.auth.me) this.auth.me.name = v.pushNameSetting.name; return; }
+    if (type === 'contact') { if (v.contactAction) this.pushnames[jid] = v.contactAction.fullName || v.contactAction.firstName || this.pushnames[jid]; return; }
+    if (type === 'star' || type === 'deleteMessageForMe') return; // a nivel de mensaje
+    const chat = this.chats.get(jid) || { id: jid };
+    if (type === 'mute') chat.muteEndTime = v.muteAction?.muted ? Number(v.muteAction.muteEndTimestamp || 0) : null;
+    else if (type === 'pin_v1') chat.pinned = !!v.pinAction?.pinned;
+    else if (type === 'archive') chat.archived = !!v.archiveChatAction?.archived;
+    else if (type === 'markChatAsRead') chat.unread = v.markChatAsReadAction?.read ? 0 : -1;
+    else return;
+    this.chats.set(jid, chat);
+    this.scheduleSaveState();
+  }
 
   // Envía una mutación de app state (cifrada con LTHash) por IQ w:sync:app:state.
   async sendAppStatePatch(name, mutation) {
     const keyId = this.auth.myAppStateKeyId;
     if (!keyId || !this.auth.appStateSyncKeys[keyId]) throw new Error('sin app-state-sync-key (re-vincula y espera el sync)');
+    // Sincronizar la versión base con el servidor antes de enviar (evita rechazo).
+    await this.resyncAppState([name]).catch(() => {});
     const keyData = Buffer.from(this.auth.appStateSyncKeys[keyId], 'base64');
     const raw = this.auth.appStateVersions[name];
     const state = raw
@@ -760,6 +956,15 @@ export class Session {
   async groupAcceptInvite(code) { return groupAcceptInvite(this.client, code); }
   async groupInviteInfo(code) { return groupGetInviteInfo(this.client, code); }
   async groupLeave(groupJid) { return groupLeave(this.client, groupJid); }
+  async groupEphemeral(groupJid, seconds) { return groupToggleEphemeral(this.client, groupJid, Number(seconds) || 0); }
+  async groupJoinRequests(groupJid) { return groupRequestParticipantsList(this.client, groupJid); }
+  async groupJoinRequestsUpdate(groupJid, participants, action) { return groupRequestParticipantsUpdate(this.client, groupJid, participants.map((p) => toWhatsAppJid(p)), action); }
+  async groupAddMode(groupJid, mode) { return groupMemberAddMode(this.client, groupJid, mode); }
+  async groupApprovalMode(groupJid, mode) { return groupJoinApprovalMode(this.client, groupJid, mode); }
+  async communityCreate(subject, body) { return communityCreate(this.client, subject, body); }
+  async communityLink(parentJid, groupJid) { return communityLinkGroup(this.client, parentJid, groupJid); }
+  async communityUnlink(parentJid, groupJid) { return communityUnlinkGroup(this.client, parentJid, groupJid); }
+  async communitySubgroups(jid) { return getSubgroups(this.client, jid); }
 
   // ---- Perfil, contactos y privacidad ----
   async onWhatsApp(numbers) { return onWhatsApp(this.client, numbers); }
@@ -771,6 +976,35 @@ export class Session {
   async businessProfile(jid) { return getBusinessProfile(this.client, jid); }
   async privacySettings() { return fetchPrivacySettings(this.client); }
   async setPrivacy(name, value) { return updatePrivacySetting(this.client, name, value); }
+
+  // ---- Emparejamiento por código (alternativa al QR) ----
+  // Solicita un código de 8 caracteres para teclear en el móvil. Requiere que la
+  // sesión esté conectada al servidor (handshake hecho) y aún no registrada.
+  async requestPairingCode(phone) {
+    if (!this.client) throw new Error('sesión no iniciada');
+    if (this.auth.registered || this.auth.account) throw new Error('la sesión ya está emparejada');
+    const code = await this.client.requestPairingCode(phone);
+    this.pairingCode = code;
+    this.status = 'pairing_code';
+    await this.persist();
+    return code;
+  }
+
+  // ---- LID (Linked ID) ----
+  lidForPn(pn) { return getLIDForPN(this.auth, pn); }
+  pnForLid(lid) { return getPNForLID(this.auth, lid); }
+
+  // ---- Bloqueos y estados/historias ----
+  async blocklist() { return fetchBlocklist(this.client); }
+  async blockUser(jid) { return updateBlockStatus(this.client, jid, 'block'); }
+  async unblockUser(jid) { return updateBlockStatus(this.client, jid, 'unblock'); }
+  // Publica un estado de texto. statusJidList = contactos que lo verán.
+  async setTextStatus(text, statusJidList = [], opts = {}) {
+    const m = opts.font || opts.backgroundArgb
+      ? { extendedTextMessage: { text, font: opts.font, backgroundArgb: opts.backgroundArgb, textArgb: opts.textArgb } }
+      : { conversation: text };
+    return this.sendStatus(m, statusJidList);
+  }
 
   // ---- Newsletters / Canales ----
   async newsletterCreate(name, description) { return newsletterCreate(this.client, name, description); }

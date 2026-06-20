@@ -41,6 +41,18 @@ export function registerSessionRoutes(router, manager) {
     res.end(png);
   });
 
+  // Emparejamiento por CÓDIGO (alternativa al QR).  POST { phone:"34600111222" }
+  // Devuelve el código de 8 caracteres a teclear en el móvil
+  // (WhatsApp > Dispositivos vinculados > Vincular con número de teléfono).
+  router.post('/sessions/:id/pairing-code', async ({ params, body, send }) => {
+    const s = manager.get(params.id);
+    if (!s) return send(404, { error: 'no_existe' });
+    const phone = String(body.phone || '').replace(/[^0-9]/g, '');
+    if (!phone) return send(400, { error: 'falta_phone' });
+    try { send(200, { code: await s.requestPairingCode(phone), status: s.status }); }
+    catch (err) { send(409, { error: 'fallo', message: String(err?.message || err) }); }
+  });
+
   // Cierra la sesión (sin borrar credenciales).
   router.post('/sessions/:id/logout', async ({ params, send }) => {
     const s = manager.get(params.id);

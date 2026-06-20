@@ -52,6 +52,11 @@ export function extractGroupMetadata(res) {
     restrict: Boolean(child(group, 'locked')),
     announce: Boolean(child(group, 'announcement')),
     ephemeralDuration: ephemeral ? Number(ephemeral.attrs.expiration) : 0,
+    memberAddMode: child(group, 'member_add_mode')?.content?.toString('utf8') === 'all_member_add',
+    joinApprovalMode: Boolean(child(group, 'membership_approval_mode')),
+    linkedParent: child(group, 'linked_parent')?.attrs?.jid || undefined,
+    isCommunity: Boolean(child(group, 'parent')),
+    isCommunityAnnounce: Boolean(child(group, 'default_sub_group')),
     participants: children(group, 'participant').map((p) => ({ id: p.attrs.jid, admin: p.attrs.type || null })),
   };
 }
@@ -128,6 +133,75 @@ export async function groupGetInviteInfo(client, code) {
 export async function groupLeave(client, jid) {
   await groupQuery(client, GROUP_HOST, 'set', [{ tag: 'leave', attrs: {}, content: [{ tag: 'group', attrs: { id: jid }, content: undefined }] }]);
   return { ok: true };
+}
+
+// ---- Extras de grupo ----
+
+// Activa/desactiva mensajes efímeros. expiration en segundos (0 = desactivar).
+export async function groupToggleEphemeral(client, jid, expiration) {
+  const node = expiration > 0
+    ? { tag: 'ephemeral', attrs: { expiration: String(expiration) }, content: undefined }
+    : { tag: 'not_ephemeral', attrs: {}, content: undefined };
+  await groupQuery(client, jid, 'set', [node]);
+  return { ok: true, expiration: expiration > 0 ? expiration : 0 };
+}
+
+// Lista de solicitudes de unión pendientes (cuando hay aprobación).
+export async function groupRequestParticipantsList(client, jid) {
+  const res = await groupQuery(client, jid, 'get', [{ tag: 'membership_approval_requests', attrs: {}, content: undefined }]);
+  return children(child(res, 'membership_approval_requests'), 'membership_approval_request').map((n) => n.attrs);
+}
+
+// Aprueba o rechaza solicitudes. action: 'approve' | 'reject'.
+export async function groupRequestParticipantsUpdate(client, jid, participants, action) {
+  const res = await groupQuery(client, jid, 'set', [{ tag: 'membership_requests_action', attrs: {}, content: [{
+    tag: action, attrs: {}, content: participants.map((j) => ({ tag: 'participant', attrs: { jid: j }, content: undefined })),
+  }] }]);
+  const node = child(child(res, 'membership_requests_action'), action);
+  return children(node, 'participant').map((p) => ({ jid: p.attrs.jid, status: p.attrs.error || '200' }));
+}
+
+// Quién puede añadir miembros. mode: 'all_member_add' | 'admin_add'.
+export async function groupMemberAddMode(client, jid, mode) {
+  await groupQuery(client, jid, 'set', [{ tag: 'member_add_mode', attrs: {}, content: mode }]);
+  return { ok: true, mode };
+}
+
+// Exigir aprobación para unirse. mode: 'on' | 'off'.
+export async function groupJoinApprovalMode(client, jid, mode) {
+  await groupQuery(client, jid, 'set', [{ tag: 'membership_approval_mode', attrs: {}, content: [{ tag: 'group_join', attrs: { state: mode }, content: undefined }] }]);
+  return { ok: true, mode };
+}
+
+// ---- Comunidades (mismo IQ w:g2) ----
+
+export async function communityCreate(client, subject, body = '') {
+  const res = await groupQuery(client, GROUP_HOST, 'set', [{ tag: 'create', attrs: { subject }, content: [
+    { tag: 'description', attrs: { id: generateMessageIDV2(client.auth.me.id).slice(0, 12) }, content: [{ tag: 'body', attrs: {}, content: Buffer.from(body, 'utf-8') }] },
+    { tag: 'parent', attrs: { default_membership_approval_mode: 'request_required' }, content: undefined },
+    { tag: 'allow_non_admin_sub_group_creation', attrs: {}, content: undefined },
+    { tag: 'create_general_chat', attrs: {}, content: undefined },
+  ] }]);
+  return extractGroupMetadata(res);
+}
+
+export async function communityLinkGroup(client, parentJid, groupJid) {
+  await groupQuery(client, parentJid, 'set', [{ tag: 'links', attrs: {}, content: [{ tag: 'link', attrs: { link_type: 'sub_group' }, content: [{ tag: 'group', attrs: { jid: groupJid }, content: undefined }] }] }]);
+  return { ok: true };
+}
+
+export async function communityUnlinkGroup(client, parentJid, groupJid) {
+  await groupQuery(client, parentJid, 'set', [{ tag: 'unlink', attrs: { unlink_type: 'sub_group' }, content: [{ tag: 'group', attrs: { jid: groupJid }, content: undefined }] }]);
+  return { ok: true };
+}
+
+// Sub-grupos de una comunidad (resuelve el padre si jid es un sub-grupo).
+export async function getSubgroups(client, jid) {
+  let communityJid = jid;
+  const meta = await groupMetadata(client, jid).catch(() => null);
+  if (meta?.linkedParent) communityJid = meta.linkedParent;
+  const res = await groupQuery(client, communityJid, 'get', [{ tag: 'sub_groups', attrs: {}, content: undefined }]);
+  return children(child(res, 'sub_groups'), 'group').map((g) => ({ id: `${g.attrs.id}@g.us`, subject: g.attrs.subject, creation: g.attrs.creation ? Number(g.attrs.creation) : undefined, owner: g.attrs.creator, size: g.attrs.size ? Number(g.attrs.size) : undefined }));
 }
 
 export { S_WHATSAPP_NET };
