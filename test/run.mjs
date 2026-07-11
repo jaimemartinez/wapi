@@ -2,6 +2,9 @@
 // capa. Es lo que ejecuta el CI. Sale con código !=0 si algo falla.
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { tmpdir } from 'node:os';
+
+const TMP = tmpdir(); // los tests que crean Session no deben escribir en el repo
 
 let passed = 0;
 async function test(name, fn) {
@@ -120,7 +123,7 @@ await test('descifrado de voto de encuesta', async () => {
   const iv = randomBytes(12);
   const enc = aesGcmEncrypt(encode('PollVoteMessage', { selectedOptions: [sel] }), decKey, iv, Buffer.from(`${pollId}\0${voter}`));
   const a = newAuthState(); a.me = { id: '111:1@s.whatsapp.net' };
-  const sess = new Session('t', a, { sessionsDir: '.' }); sess.polls.set(pollId, { secret, options: ['Rojo', 'Azul'], creator: a.me.id });
+  const sess = new Session('t', a, { sessionsDir: TMP }); sess.polls.set(pollId, { secret, options: ['Rojo', 'Azul'], creator: a.me.id });
   const out = await sess.decryptPollVote({ pollCreationMessageKey: { id: pollId }, vote: { encPayload: enc, encIv: iv } }, voter);
   assert.deepEqual(out, ['Azul']);
 });
@@ -176,6 +179,46 @@ await test('botones/lista/interactivo/pin/keep encodean', async () => {
     keepInChatMessage: { key: { id: 'M' }, keepType: 1 },
   };
   for (const [k, v] of Object.entries(cases)) assert.ok(type('Message').decode(encode('Message', { [k]: v }))[k] != null, k);
+});
+
+console.log('# API: eventos, validación, rate limiting');
+await test('bus de eventos: subscribe/emit/unsubscribe', async () => {
+  const { Session } = await import('../src/core/Session.js');
+  const { newAuthState } = await import('../src/core/auth.js');
+  const s = new Session('t2', newAuthState(), { sessionsDir: TMP });
+  const got = [];
+  const unsub = s.subscribe((e) => got.push(e));
+  s.emitEvent('message', { id: 'M1', text: 'hi' });
+  s.emitEvent('receipt', { id: 'M1', type: 'read' });
+  unsub();
+  s.emitEvent('message', { id: 'M2' }); // ya no debe llegar
+  assert.equal(got.length, 2);
+  assert.equal(got[0].type, 'message'); assert.equal(got[0].data.text, 'hi'); assert.equal(got[0].session, 't2');
+});
+await test('setWebhook filtra por tipo', async () => {
+  const { Session } = await import('../src/core/Session.js');
+  const { newAuthState } = await import('../src/core/auth.js');
+  const s = new Session('t3', newAuthState(), { sessionsDir: TMP });
+  assert.deepEqual(s.setWebhook('https://x/h', ['message']), { url: 'https://x/h', events: ['message'] });
+  assert.equal(s.setWebhook(null), null);
+});
+await test('validación: requireFields/requireEnum/requireArray -> 400', async () => {
+  const { requireFields, requireEnum, requireArray, BadRequest } = await import('../src/api/validate.js');
+  assert.throws(() => requireFields({ a: 1 }, ['a', 'b']), (e) => e instanceof BadRequest && e.status === 400);
+  assert.throws(() => requireEnum({ x: 'z' }, 'x', ['a', 'b']), (e) => e.status === 400);
+  assert.throws(() => requireArray({ l: [] }, 'l'), (e) => e.status === 400);
+  requireFields({ a: 1, b: 2 }, ['a', 'b']); requireArray({ l: [1] }, 'l'); // no lanzan
+});
+await test('rate limiter: ventana fija', async () => {
+  const { Router } = await import('../src/api/router.js');
+  const { config } = await import('../src/config.js');
+  const r = new Router();
+  const prev = config.rateLimit; config.rateLimit = 3; config.rateWindowMs = 1000;
+  const now = 5000;
+  assert.ok(r.checkRate('k', now).ok); assert.ok(r.checkRate('k', now).ok); assert.ok(r.checkRate('k', now).ok);
+  assert.equal(r.checkRate('k', now).ok, false); // 4ª supera el límite
+  assert.ok(r.checkRate('k', now + 1001).ok); // nueva ventana
+  config.rateLimit = prev;
 });
 
 console.log(`\n${passed} tests OK${process.exitCode ? ' (con fallos)' : ''}`);

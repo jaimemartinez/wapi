@@ -14,6 +14,10 @@ export const config = {
   // Token simple para proteger la API (cabecera `x-api-key`). Vacío = sin auth.
   apiKey: process.env.WAPI_KEY || '',
 
+  // Rate limiting por cliente (API key o IP), ventana fija. 0 = desactivado.
+  rateLimit: Number(process.env.WAPI_RATE_LIMIT || 300), // peticiones por ventana
+  rateWindowMs: Number(process.env.WAPI_RATE_WINDOW_MS || 60000), // tamaño de ventana
+
   // Carpeta donde se persisten credenciales/claves de cada sesión.
   sessionsDir: process.env.WAPI_SESSIONS_DIR || join(ROOT, 'sessions'),
 

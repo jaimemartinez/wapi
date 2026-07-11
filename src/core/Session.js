@@ -71,6 +71,9 @@ export class Session {
     this.closeReason = null; // motivo del último cierre del socket
     this.stateFile = join(config.sessionsDir, `${id}.state.json`);
     this.saveStateTimer = null;
+    // ---- Bus de eventos en tiempo real (webhooks + SSE) ----
+    this.eventListeners = new Set(); // suscriptores SSE: (event) => void
+    this.webhook = null;             // { url, events? } — persistido; push saliente
     // Almacén Signal: persiste el estado cuando cambia (sesiones, identidades).
     this.signal = new SignalStore(auth, () => { this.persist().catch(() => {}); });
   }
@@ -83,6 +86,7 @@ export class Session {
       this.chats = new Map((data.chats || []).map((c) => [c.id, c]));
       this.messages = data.messages || [];
       this.pushnames = data.pushnames || {};
+      this.webhook = data.webhook || null;
     } catch { /* sin estado previo: empezamos vacíos */ }
   }
 
@@ -91,9 +95,50 @@ export class Session {
     if (this.saveStateTimer) return;
     this.saveStateTimer = setTimeout(() => {
       this.saveStateTimer = null;
-      const data = { chats: [...this.chats.values()], messages: this.messages, pushnames: this.pushnames };
+      const data = { chats: [...this.chats.values()], messages: this.messages, pushnames: this.pushnames, webhook: this.webhook };
       writeFile(this.stateFile, JSON.stringify(data), 'utf8').catch(() => {});
     }, 1000);
+  }
+
+  // ---- Eventos en tiempo real ----
+
+  // Registra un suscriptor SSE. Devuelve la función para desuscribir.
+  subscribe(fn) { this.eventListeners.add(fn); return () => this.eventListeners.delete(fn); }
+
+  // Emite un evento de alto nivel a los suscriptores SSE y al webhook (si hay).
+  // type: 'message' | 'receipt' | 'presence' | 'call' | 'status'.
+  emitEvent(type, data) {
+    const event = { session: this.id, type, at: new Date().toISOString(), data };
+    for (const fn of this.eventListeners) { try { fn(event); } catch { /* suscriptor roto: lo ignoramos */ } }
+    this.deliverWebhook(event);
+  }
+
+  // Configura/actualiza el webhook saliente. url vacío/null lo desactiva.
+  setWebhook(url, events) {
+    this.webhook = url ? { url, events: Array.isArray(events) && events.length ? events : undefined } : null;
+    this.scheduleSaveState();
+    return this.webhook;
+  }
+
+  // POST del evento al webhook (fire-and-forget, timeout 5s, un reintento).
+  async deliverWebhook(event) {
+    const wh = this.webhook;
+    if (!wh?.url) return;
+    if (wh.events && !wh.events.includes(event.type)) return; // filtrado por tipo
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 5000);
+      try {
+        const res = await fetch(wh.url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'user-agent': 'wapi-webhook/1' },
+          body: JSON.stringify(event),
+          signal: ac.signal,
+        });
+        clearTimeout(timer);
+        if (res.ok) return;
+      } catch { clearTimeout(timer); /* reintentamos una vez */ }
+    }
   }
 
   async start() {
@@ -106,12 +151,13 @@ export class Session {
     this.signal = new SignalStore(this.auth, () => { this.persist().catch(() => {}); });
     this.client = new WhatsAppClient(this.auth, this.config);
 
-    this.client.on('qr', (qr) => { this.qr = qr; this.status = 'qr'; });
-    this.client.on('open', () => { this.qr = null; this.status = 'connected'; this.retries = 0; });
+    this.client.on('qr', (qr) => { this.qr = qr; this.status = 'qr'; this.emitEvent('status', { status: 'qr' }); });
+    this.client.on('open', () => { this.qr = null; this.status = 'connected'; this.retries = 0; this.emitEvent('status', { status: 'connected' }); });
     this.client.on('creds', () => { this.persist().catch(() => {}); });
     this.client.on('close', ({ code, reason } = {}) => {
       this.status = this.loggedOut ? 'logged_out' : 'closed';
       this.closeReason = { code, reason: reason || null, at: new Date().toISOString() };
+      this.emitEvent('status', { status: this.status, code, reason: reason || null });
       console.error(`[session ${this.id}] close code=${code} reason=${reason || ''}`);
       // No reconectar si las credenciales están muertas (401) o si se cerró a
       // propósito (logout/destroy): sería un bucle.
@@ -178,14 +224,16 @@ export class Session {
     // Registro de llamadas entrantes (detección; el audio no está soportado).
     this.client.on('call', (node) => {
       const offer = (node.content || []).find((n) => n.tag === 'offer') || node;
-      this.calls.unshift({
+      const call = {
         id: offer.attrs?.['call-id'] || node.attrs?.id,
         from: node.attrs?.from,
         at: new Date().toISOString(),
         type: offer.tag === 'offer' ? 'offer' : node.attrs?.type || 'unknown',
         raw: node.attrs,
-      });
+      };
+      this.calls.unshift(call);
       this.calls = this.calls.slice(0, 100);
+      this.emitEvent('call', call);
     });
 
     // Mensajes entrantes: descifrar el <enc> con Signal y guardar el texto.
@@ -309,9 +357,12 @@ export class Session {
     const chat = isGroup ? parsed.from : author;
 
     const push = (extra) => {
-      this.messages.unshift({ id: parsed.id, chat, from: author, at: new Date().toISOString(), ...extra });
+      const evt = { id: parsed.id, chat, from: author, at: new Date().toISOString(), ...extra };
+      this.messages.unshift(evt);
       this.messages = this.messages.slice(0, 200);
       this.scheduleSaveState();
+      this.emitEvent('message', evt);
+      return evt;
     };
 
     // Reacción entrante.
@@ -335,8 +386,7 @@ export class Session {
     const media = detectMedia(inner);
     if (media) {
       const m = media.info;
-      this.messages.unshift({
-        id: parsed.id, chat, from: author, at: new Date().toISOString(),
+      push({
         type: media.type,
         caption: m.caption || m.title || '',
         media: {
@@ -346,8 +396,6 @@ export class Session {
           mimetype: m.mimetype, fileLength: Number(m.fileLength || 0), fileName: m.fileName,
         },
       });
-      this.messages = this.messages.slice(0, 200);
-      this.scheduleSaveState();
       return;
     }
 
@@ -426,7 +474,10 @@ export class Session {
     try {
       const retry = (node.content || []).find((n) => n.tag === 'retry');
       if (a.type === 'retry' && retry) await this.handleRetry(node);
-      else if (a.type) this.lastReceipt = { id: a.id, from: a.from, type: a.type, at: new Date().toISOString() };
+      else if (a.type) {
+        this.lastReceipt = { id: a.id, from: a.from, type: a.type, at: new Date().toISOString() };
+        this.emitEvent('receipt', { id: a.id, from: a.from, participant: a.participant, type: a.type });
+      }
     } finally {
       this.client.ack(node);
     }
@@ -751,6 +802,7 @@ export class Session {
         at: new Date().toISOString(),
       };
     }
+    this.emitEvent('presence', { jid, ...this.presences[jid] });
   }
 
   // Envía un mensaje de texto a un GRUPO usando sender keys: el cuerpo va una vez

@@ -49,9 +49,16 @@ A self-hosted WhatsApp REST API with a from-scratch, native implementation of th
 - Status / stories (publish text)
 - Newsletters / channels
 
+**Real-time delivery**
+- **Webhooks** — push every event (`message`, `receipt`, `presence`, `call`, `status`) to a URL you register per session, with optional per-type filtering
+- **SSE stream** — subscribe to live events over `GET /sessions/:id/events` (Server-Sent Events)
+
 **State sync**
 - **Bidirectional App State** — send *and* receive archive, pin, mute, mark-read, star, and delete, with version sync and LTHash verification
 - Chat list via history sync
+
+**Hardening**
+- Optional API-key auth (header or query), per-client **rate limiting**, request-body validation, and atomic credential writes
 
 **Calls**
 - Detect and reject incoming calls (native audio/video is out of scope)
@@ -145,6 +152,8 @@ All configuration is via environment variables — no config file, no container 
 | `WAPI_KEY`          | *(empty)*                 | API token. If set, every request must send `x-api-key`. Empty = no auth. |
 | `WAPI_SESSIONS_DIR` | `./sessions`              | Directory where each session's credentials and keys are persisted. |
 | `WAPI_DEVICE_NAME`  | `wapi`                    | Device name announced to WhatsApp during the handshake.            |
+| `WAPI_RATE_LIMIT`   | `300`                     | Max requests per client per window (`0` disables rate limiting).   |
+| `WAPI_RATE_WINDOW_MS` | `60000`                 | Rate-limit window size in milliseconds.                            |
 
 ## Testing
 

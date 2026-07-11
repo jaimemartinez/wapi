@@ -7,7 +7,7 @@ export function registerProfileRoutes(router, manager) {
     if (!s) return send(404, { error: 'no_existe' });
     if (!ok(s)) return send(409, { error: 'no_conectada', status: s.status });
     try { send(200, await fn(s, body, params)); }
-    catch (err) { send(500, { error: 'fallo', message: String(err?.message || err) }); }
+    catch (err) { send(err.status || 500, { error: err.code || 'fallo', message: String(err?.message || err) }); }
   });
 
   // ¿Está en WhatsApp?  POST { numbers:["+34600...", ...] }

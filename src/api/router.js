@@ -6,6 +6,18 @@ export class Router {
   constructor() {
     /** @type {{method:string, parts:string[], handler:Function}[]} */
     this.routes = [];
+    this.rateBuckets = new Map(); // clave -> { count, resetAt }
+  }
+
+  // Ventana fija de rate limiting. Devuelve { ok, retryAfterMs }.
+  checkRate(who, now = Date.now()) {
+    let b = this.rateBuckets.get(who);
+    if (!b || now >= b.resetAt) { b = { count: 0, resetAt: now + config.rateWindowMs }; this.rateBuckets.set(who, b); }
+    b.count++;
+    // Poda perezosa para que el mapa no crezca sin límite.
+    if (this.rateBuckets.size > 10000) for (const [k, v] of this.rateBuckets) if (now >= v.resetAt) this.rateBuckets.delete(k);
+    if (b.count > config.rateLimit) return { ok: false, retryAfterMs: b.resetAt - now };
+    return { ok: true };
   }
 
   add(method, path, handler) {
@@ -39,10 +51,25 @@ export class Router {
   handler() {
     return async (req, res) => {
       try {
-        // Auth opcional por API key (las rutas públicas quedan exentas).
-        const publicPath = ['/health', '/docs', '/openapi.json'].includes(req.url.split('?')[0]);
-        if (config.apiKey && !publicPath && req.headers['x-api-key'] !== config.apiKey) {
+        const path = req.url.split('?')[0];
+        const publicPath = ['/health', '/docs', '/openapi.json'].includes(path);
+        // Auth opcional por API key (las rutas públicas quedan exentas). Se acepta
+        // por cabecera `x-api-key` o por query `?apikey=` (necesario para SSE, ya
+        // que EventSource no permite cabeceras personalizadas).
+        const key = req.headers['x-api-key'] || new URL(req.url, 'http://x').searchParams.get('apikey');
+        if (config.apiKey && !publicPath && key !== config.apiKey) {
           return send(res, 401, { error: 'unauthorized' });
+        }
+
+        // Rate limiting por cliente (ventana fija). El stream SSE queda exento
+        // (es una única conexión larga, no un flujo de peticiones).
+        if (config.rateLimit > 0 && !publicPath && !path.endsWith('/events')) {
+          const who = (config.apiKey && key) || req.socket.remoteAddress || 'anon';
+          const rl = this.checkRate(who);
+          if (!rl.ok) {
+            res.setHeader('retry-after', Math.ceil(rl.retryAfterMs / 1000));
+            return send(res, 429, { error: 'rate_limited', message: 'Too many requests', retryAfterMs: rl.retryAfterMs });
+          }
         }
 
         const matched = this.match(req.method, req.url);

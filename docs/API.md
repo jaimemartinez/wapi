@@ -1985,3 +1985,64 @@ On failure (call not found or not yet implemented) the response is `501`:
 { "error": "no_implementado_aun", "message": "..." }
 ```
 
+
+## Real-time events (Webhooks & SSE)
+
+Instead of polling `GET /sessions/:id/messages`, you can receive events as they
+happen. Every event has the shape:
+
+```json
+{ "session": "me", "type": "message", "at": "2026-01-01T12:00:00.000Z", "data": { } }
+```
+
+Event types: `message` (inbound message/reaction/poll-vote/media/location/contact),
+`receipt` (delivery/read/played), `presence`, `call`, and `status` (connection changes).
+
+### Webhooks
+
+Register a URL that receives an HTTP `POST` for each event. Optionally filter by type.
+
+```bash
+# Set (optionally filter to certain types)
+curl -X POST http://127.0.0.1:4000/sessions/me/webhook \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://example.com/hook","events":["message","receipt"]}'
+
+# Inspect
+curl http://127.0.0.1:4000/sessions/me/webhook
+
+# Remove
+curl -X DELETE http://127.0.0.1:4000/sessions/me/webhook
+```
+
+Delivery is fire-and-forget with a 5 s timeout and one retry. The webhook config
+persists across restarts.
+
+### SSE stream
+
+Subscribe to a live stream with `GET /sessions/:id/events` (Server-Sent Events).
+Because `EventSource` cannot send custom headers, pass the API key (when set) via
+`?apikey=`.
+
+```js
+const es = new EventSource("http://127.0.0.1:4000/sessions/me/events");
+es.addEventListener("message", (e) => console.log("message", JSON.parse(e.data)));
+es.addEventListener("receipt", (e) => console.log("receipt", JSON.parse(e.data)));
+es.addEventListener("status",  (e) => console.log("status",  JSON.parse(e.data)));
+```
+
+```bash
+curl -N http://127.0.0.1:4000/sessions/me/events
+# event: ready
+# data: {"session":"me","status":"connected"}
+#
+# event: message
+# data: {"session":"me","type":"message","at":"...","data":{"id":"3EB0...","text":"hi"}}
+```
+
+## Rate limiting
+
+When `WAPI_RATE_LIMIT` > 0 (default 300 per 60 s), each client (by API key, or IP
+when unauthenticated) is limited per fixed window. Exceeding it returns
+`429 { "error": "rate_limited", "retryAfterMs": <n> }` with a `Retry-After` header.
+The SSE stream endpoint is exempt.

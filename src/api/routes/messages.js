@@ -1,4 +1,6 @@
 // Rutas de mensajería.
+import { requireFields, requireEnum, requireArray } from '../validate.js';
+
 export function registerMessageRoutes(router, manager) {
   // Enviar un mensaje de texto.
   //   POST /sessions/:id/messages  { "to": "34600...", "text": "hola" }
@@ -25,17 +27,17 @@ export function registerMessageRoutes(router, manager) {
     if (!s) return send(404, { error: 'no_existe' });
     if (s.status !== 'connected') return send(409, { error: 'no_conectada', status: s.status });
     try { send(200, { ok: true, ...(await fn(s, body, params)) }); }
-    catch (err) { send(500, { error: 'envio_fallido', message: String(err?.message || err) }); }
+    catch (err) { send(err.status || 500, { error: err.code || 'envio_fallido', message: String(err?.message || err) }); }
   });
 
   // Reacción a un mensaje.  { to, key:{remoteJid,fromMe,id,participant}, emoji }
-  sendAction('/sessions/:id/reactions', (s, b) => s.sendReaction(b.to, b.key, b.emoji));
+  sendAction('/sessions/:id/reactions', (s, b) => { requireFields(b, ['to', 'key']); return s.sendReaction(b.to, b.key, b.emoji); });
   // Ubicación.  { to, latitude, longitude, name?, address? }
-  sendAction('/sessions/:id/location', (s, b) => s.sendLocation(b.to, b, b.options || {}));
+  sendAction('/sessions/:id/location', (s, b) => { requireFields(b, ['to', 'latitude', 'longitude']); return s.sendLocation(b.to, b, b.options || {}); });
   // Contacto(s).  { to, contacts: {displayName,vcard} | [...] }
-  sendAction('/sessions/:id/contacts', (s, b) => s.sendContact(b.to, b.contacts, b.options || {}));
+  sendAction('/sessions/:id/contacts', (s, b) => { requireFields(b, ['to', 'contacts']); return s.sendContact(b.to, b.contacts, b.options || {}); });
   // Encuesta.  { to, name, options:[...], selectableCount? }
-  sendAction('/sessions/:id/polls', (s, b) => s.sendPoll(b.to, { name: b.name, options: b.options, selectableCount: b.selectableCount }, b.options2 || {}));
+  sendAction('/sessions/:id/polls', (s, b) => { requireFields(b, ['to', 'name']); requireArray(b, 'options'); return s.sendPoll(b.to, { name: b.name, options: b.options, selectableCount: b.selectableCount }, b.options2 || {}); });
   // Editar un mensaje propio.  { to, targetId, text }
   sendAction('/sessions/:id/messages/edit', (s, b) => s.editMessage(b.to, b.targetId, b.text, b.options || {}));
   // Borrar/revocar para todos.  { to, key:{id,fromMe,participant?} }
@@ -155,12 +157,12 @@ export function registerMessageRoutes(router, manager) {
     if (!s) return send(404, { error: 'no_existe' });
     if (s.status !== 'connected') return send(409, { error: 'no_conectada', status: s.status });
     try { send(200, { ok: true, ...(await fn(s, params, body)) }); }
-    catch (err) { send(500, { error: 'fallo', message: String(err?.message || err) }); }
+    catch (err) { send(err.status || 500, { error: err.code || 'fallo', message: String(err?.message || err) }); }
   });
   // Crear grupo.  { subject, participants:[...] }
-  groupAction('/sessions/:id/groups', (s, p, b) => s.groupCreate(b.subject, b.participants || []));
+  groupAction('/sessions/:id/groups', (s, p, b) => { requireFields(b, ['subject']); requireArray(b, 'participants'); return s.groupCreate(b.subject, b.participants); });
   // Participantes.  POST .../participants { participants:[...], action:"add|remove|promote|demote" }
-  groupAction('/sessions/:id/groups/:gid/participants', (s, p, b) => s.groupParticipants(p.gid, b.participants || [], b.action).then((r) => ({ result: r })));
+  groupAction('/sessions/:id/groups/:gid/participants', (s, p, b) => { requireArray(b, 'participants'); requireEnum(b, 'action', ['add', 'remove', 'promote', 'demote']); return s.groupParticipants(p.gid, b.participants, b.action).then((r) => ({ result: r })); });
   // Asunto.  { subject }
   groupAction('/sessions/:id/groups/:gid/subject', (s, p, b) => s.groupSubject(p.gid, b.subject));
   // Descripción.  { description } (vacío/omitido = borrar)

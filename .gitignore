@@ -2,3 +2,5 @@ node_modules/
 sessions/
 *.log
 .env
+*.state.json
+*.json.tmp

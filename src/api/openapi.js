@@ -8531,6 +8531,259 @@ export const openapiSpec = {
           }
         }
       }
+    },
+    "/sessions/{id}/events": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Real-time event stream (SSE)",
+        "description": "Server-Sent Events stream of live session events: message, receipt, presence, call and status. The connection stays open; each event is delivered as an SSE frame `event: <type>` / `data: <json>`. When auth is enabled, pass the key via `?apikey=` because EventSource cannot set custom headers.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A text/event-stream of events.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown session id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFound"
+                },
+                "example": {
+                  "error": "no_existe"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{id}/webhook": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Get the outgoing webhook",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current webhook config (or null).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhook": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "url": {
+                          "type": "string"
+                        },
+                        "events": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "webhook": {
+                    "url": "https://example.com/hook",
+                    "events": [
+                      "message",
+                      "receipt"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown session id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFound"
+                },
+                "example": {
+                  "error": "no_existe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Set the outgoing webhook",
+        "description": "Registers a URL that receives an HTTP POST for every session event. Optionally filter by event types. Each delivery body is `{ session, type, at, data }`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "example": "https://example.com/hook"
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "message",
+                        "receipt",
+                        "presence",
+                        "call",
+                        "status"
+                      ]
+                    },
+                    "example": [
+                      "message",
+                      "receipt"
+                    ]
+                  }
+                }
+              },
+              "example": {
+                "url": "https://example.com/hook",
+                "events": [
+                  "message",
+                  "receipt"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "webhook": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "example": {
+                  "ok": true,
+                  "webhook": {
+                    "url": "https://example.com/hook",
+                    "events": [
+                      "message",
+                      "receipt"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid url."
+          },
+          "404": {
+            "description": "Unknown session id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFound"
+                },
+                "example": {
+                  "error": "no_existe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Delete the outgoing webhook",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "webhook": {
+                      "type": "object",
+                      "nullable": true
+                    }
+                  }
+                },
+                "example": {
+                  "ok": true,
+                  "webhook": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown session id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFound"
+                },
+                "example": {
+                  "error": "no_existe"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 };
@@ -8704,7 +8957,7 @@ export const swaggerHtml = `<!doctype html>
     }catch(e){return ''}
   }
 
-  function pathParams(p){var m=p.match(/\\{([^}]+)\\}/g)||[];return m.map(function(x){return x.slice(1,-1)})}
+  function pathParams(p){var m=p.match(/\{([^}]+)\}/g)||[];return m.map(function(x){return x.slice(1,-1)})}
 
   function render(){
     var q=(document.getElementById('search').value||'').toLowerCase();

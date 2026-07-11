@@ -67,4 +67,52 @@ export function registerSessionRoutes(router, manager) {
     await manager.destroy(params.id);
     send(200, { id: params.id, deleted: true });
   });
+
+  // ---- Eventos en tiempo real ----
+
+  // Stream SSE de eventos (message/receipt/presence/call/status). Mantiene la
+  // conexión abierta y empuja cada evento como `data: <json>`. Con auth, pasa la
+  // clave por query `?apikey=` (EventSource no admite cabeceras).
+  router.get('/sessions/:id/events', async ({ params, req, res, send }) => {
+    const s = manager.get(params.id);
+    if (!s) return send(404, { error: 'no_existe' });
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    res.write(`event: ready\ndata: ${JSON.stringify({ session: params.id, status: s.status })}\n\n`);
+    const unsubscribe = s.subscribe((event) => {
+      res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    });
+    // Latido cada 25s para que proxies no cierren la conexión.
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000);
+    const cleanup = () => { clearInterval(heartbeat); unsubscribe(); };
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+  });
+
+  // Configura el webhook saliente.  POST { url, events?: [...] }
+  router.post('/sessions/:id/webhook', async ({ params, body, send }) => {
+    const s = manager.get(params.id);
+    if (!s) return send(404, { error: 'no_existe' });
+    if (!body.url || !/^https?:\/\//i.test(body.url)) return send(400, { error: 'url_invalida', message: 'Send { "url": "https://..." }' });
+    send(200, { ok: true, webhook: s.setWebhook(body.url, body.events) });
+  });
+
+  // Consulta el webhook actual.  GET
+  router.get('/sessions/:id/webhook', async ({ params, send }) => {
+    const s = manager.get(params.id);
+    if (!s) return send(404, { error: 'no_existe' });
+    send(200, { webhook: s.webhook || null });
+  });
+
+  // Elimina el webhook.  DELETE
+  router.delete('/sessions/:id/webhook', async ({ params, send }) => {
+    const s = manager.get(params.id);
+    if (!s) return send(404, { error: 'no_existe' });
+    s.setWebhook(null);
+    send(200, { ok: true, webhook: null });
+  });
 }
